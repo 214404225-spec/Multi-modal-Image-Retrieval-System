@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large files
+*.pdf
+*.pth
+*.bin
+*.ckpt
+*.onnx
+
+# Test images (if too large)
+test_images/*.jpg
+test_images/*.png
+test_images/*.jpeg
+
+# Results
+run_result_*/
+*.log
+
+# Ollama models (don't commit models)
+ollama/
+models/
