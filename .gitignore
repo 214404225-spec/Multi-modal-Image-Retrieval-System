@@ -16,6 +16,7 @@ ENV/
 
 # IDE
 .vscode/
+.claude/
 .idea/
 *.swp
 *.swo
@@ -34,10 +35,8 @@ Thumbs.db
 *.ckpt
 *.onnx
 
-# Test images (if too large)
-test_images/*.jpg
-test_images/*.png
-test_images/*.jpeg
+# Test images
+test_images/
 
 # Results
 run_result_*/
@@ -49,3 +48,9 @@ models/
 
 # fixing process files
 fix/
+
+# CLAUDE init
+CLAUDE.md
+
+# Others
+hellcondabinconda-hook.ps1) ; (conda activate MmIRS)
