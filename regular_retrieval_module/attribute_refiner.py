@@ -5,14 +5,14 @@
 
 from typing import List, Dict, Optional
 
-from .text_encoder import TaiyiTextEncoder
-from .image_encoder import CLIPImageEncoder
+from .text_encoder import ChineseRobertaTextEncoder
+from .image_encoder import ClipViTImageEncoder
 
 
 class AttributeRefiner:
     """属性精排序器，用于根据属性条件重排序检索结果"""
     
-    def __init__(self, text_encoder: TaiyiTextEncoder, image_encoder: CLIPImageEncoder):
+    def __init__(self, text_encoder: ChineseRobertaTextEncoder, image_encoder: ClipViTImageEncoder):
         self.text_encoder = text_encoder
         self.image_encoder = image_encoder
     

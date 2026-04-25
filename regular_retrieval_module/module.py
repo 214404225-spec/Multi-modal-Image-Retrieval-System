@@ -5,8 +5,8 @@
 
 from typing import List, Dict, Any, Optional
 
-from .text_encoder import TaiyiTextEncoder
-from .image_encoder import CLIPImageEncoder
+from .text_encoder import ChineseRobertaTextEncoder
+from .image_encoder import ClipViTImageEncoder
 from .offline_indexer import OfflineIndexer
 from .attribute_refiner import AttributeRefiner
 from .retriever import Retriever
@@ -14,17 +14,19 @@ from .retriever import Retriever
 
 class RegularRetrievalModule:
     """
-    常规检索模块：基于 Taiyi-CLIP 作为中文文本编码器，
-    结合 CLIP-ViT 作为图像编码器，支持通用的文本到图像匹配。
+    常规检索模块：基于中文RoBERTa（Taiyi-CLIP文本编码器）和clip_ViT（Taiyi-CLIP图像编码器），
+    支持通用的文本到图像匹配。
     
-    架构对应v1：
-    - 离线向量库1：图像库预先用CLIP图像编码器提取特征
-    - 在线检索：CLIP文本编码器提取查询特征 → 相似度计算 → 检索策略
+    架构说明：
+    - 中文RoBERTa文本编码器：基于RoBERTa架构，专为中文语义理解优化
+    - clip_ViT图像编码器：基于CLIP ViT架构，用于图像特征提取
+    - 离线向量库：图像库预先用clip_ViT图像编码器提取特征
+    - 在线检索：中文RoBERTa文本编码器提取查询特征 → 相似度计算 → 检索策略
     """
     def __init__(self, device: str = None):
         # 初始化各子组件
-        self.text_encoder = TaiyiTextEncoder(device)
-        self.image_encoder = CLIPImageEncoder(device)
+        self.text_encoder = ChineseRobertaTextEncoder(device)
+        self.image_encoder = ClipViTImageEncoder(device)
         self.offline_indexer = OfflineIndexer(self.image_encoder)
         self.attribute_refiner = AttributeRefiner(self.text_encoder, self.image_encoder)
         self.retriever = Retriever(self.text_encoder, self.image_encoder, self.offline_indexer)

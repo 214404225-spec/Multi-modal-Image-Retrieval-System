@@ -29,11 +29,12 @@ def get_all_image_paths(directory: str) -> list:
         print(f"[警告] 图像目录不存在: {directory}")
         return []
     
-    # 支持的图像格式
-    extensions = ["*.jpg", "*.jpeg", "*.png", "*.JPEG", "*.JPG", "*.PNG"]
-    paths = []
+    # 支持的图像格式（使用集合去重，避免Windows下大小写不敏感导致的重复匹配）
+    extensions = ["*.jpg", "*.jpeg", "*.png", "*.JPG", "*.JPEG", "*.PNG"]
+    paths = set()
     for ext in extensions:
-        paths.extend(glob.glob(os.path.join(directory, ext)))
+        paths.update(glob.glob(os.path.join(directory, ext)))
+    paths = list(paths)
     
     # 转换为绝对路径并排序
     paths = [os.path.abspath(p) for p in paths]
@@ -63,20 +64,25 @@ class MultiModalAgentPipeline:
         all_image_paths = get_all_image_paths(TEST_IMAGES_DIR)
         print(f"[INFO] 从 {TEST_IMAGES_DIR} 加载了 {len(all_image_paths)} 张图像")
         
+        # 离线索引配置：可通过环境变量控制索引数量
+        # REGULAR_INDEX_SIZE: 常规检索模块索引数量（默认全部）
+        # FINE_GRAINED_INDEX_SIZE: 细粒度检索模块索引数量（默认20，VL模型处理较慢）
+        regular_index_size = int(os.environ.get("REGULAR_INDEX_SIZE", len(all_image_paths)))
+        fine_grained_index_size = int(os.environ.get("FINE_GRAINED_INDEX_SIZE", "20"))
+        
         if all_image_paths:
-            # 为加快测试速度，使用样本图像进行离线索引
-            # 常规检索模块：索引前50张图像（测试用）
-            regular_sample_size = min(50, len(all_image_paths))
+            # 常规检索模块：索引全部图像（或通过环境变量控制）
+            regular_sample_size = min(regular_index_size, len(all_image_paths))
             regular_sample_paths = all_image_paths[:regular_sample_size]
-            print(f"[INFO] 开始常规检索模块离线索引（样本{len(regular_sample_paths)}张）...")
+            print(f"[INFO] 开始常规检索模块离线索引（共{len(regular_sample_paths)}张，总计{len(all_image_paths)}张可用）...")
             self.regular_retrieval.offline_indexing(regular_sample_paths)
             
-            # 细粒度检索模块：使用真实本地图像进行离线索引（可选，因为VL模型处理较慢）
+            # 细粒度检索模块：使用真实本地图像进行离线索引
             # 注意：细粒度检索需要VL模型逐张识别图像，4000张图像可能需要很长时间
-            # 这里只索引前20张图像作为示例
-            fine_grained_sample_size = min(20, len(all_image_paths))
+            # 默认只索引前20张，可通过环境变量 FINE_GRAINED_INDEX_SIZE 调整
+            fine_grained_sample_size = min(fine_grained_index_size, len(all_image_paths))
             sample_paths = all_image_paths[:fine_grained_sample_size]
-            print(f"[INFO] 开始细粒度检索模块离线索引（样本{len(sample_paths)}张）...")
+            print(f"[INFO] 开始细粒度检索模块离线索引（共{len(sample_paths)}张，总计{len(all_image_paths)}张可用）...")
             self.fine_grained.offline_indexing(sample_paths)
         else:
             print(f"[警告] 未找到图像，检索功能将不可用")

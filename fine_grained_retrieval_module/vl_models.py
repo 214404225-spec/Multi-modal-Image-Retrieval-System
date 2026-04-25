@@ -11,7 +11,7 @@ import time
 from typing import Dict, Optional
 from PIL import Image
 
-from .constants import QWEN_VL_MODEL_NAME, QWEN_VL_OLLAMA_MODEL, LOCAL_MODEL_CACHE
+from .constants import QWEN_VL_MODEL_ID, QWEN_VL_OLLAMA_MODEL, LOCAL_MODEL_CACHE
 
 
 class VLModelManager:
@@ -28,7 +28,7 @@ class VLModelManager:
         # Ollama调用方式的模型
         self.vl_model_ollama = None
     
-    def init_transformers_model(self, model_name: str = QWEN_VL_MODEL_NAME) -> bool:
+    def init_transformers_model(self, model_name: str = QWEN_VL_MODEL_ID) -> bool:
         """初始化 transformers 加载的 Qwen2.5-VL 模型"""
         # 优先使用本地缓存路径
         model_path = LOCAL_MODEL_CACHE.get('qwen_vl')
@@ -71,7 +71,7 @@ class VLModelManager:
                     print("1. 使用Ollama方式（推荐）：")
                     print(f"   ollama pull {QWEN_VL_OLLAMA_MODEL}")
                     print("2. 手动下载模型到本地：")
-                    print(f"   huggingface-cli download {QWEN_VL_MODEL_NAME} --local-dir ./models/qwen_vl")
+                    print(f"   huggingface-cli download {QWEN_VL_MODEL_ID} --local-dir ./models/qwen_vl")
                     print("3. 在 constants.py 中配置本地路径：")
                     print(f"   LOCAL_MODEL_CACHE['qwen_vl'] = './models/qwen_vl'")
                     print("=" * 60)
@@ -79,8 +79,34 @@ class VLModelManager:
                     return False
     
     def init_ollama_model(self, model_name: str = QWEN_VL_OLLAMA_MODEL) -> bool:
-        """使用 Ollama 调用 Qwen2.5-VL"""
+        """使用 Ollama 调用 Qwen2.5-VL，包含模型可用性检查"""
         try:
+            import subprocess
+            
+            # 检查 Ollama 是否已安装
+            try:
+                result = subprocess.run(["ollama", "list"], capture_output=True, text=True, timeout=10)
+                if result.returncode != 0:
+                    print(f"[细粒度检索] Ollama 服务未运行或未安装，请先启动 Ollama")
+                    self.vl_model_ollama = None
+                    return False
+                installed_models = result.stdout
+            except FileNotFoundError:
+                print(f"[细粒度检索] 未找到 ollama 命令，请先安装 Ollama")
+                self.vl_model_ollama = None
+                return False
+            
+            # 检查目标模型是否已安装
+            model_short_name = model_name  # 如 "qwen2.5vl:3b"
+            if model_short_name not in installed_models and model_short_name.split(":")[0] not in installed_models:
+                print(f"[细粒度检索] Ollama 模型 '{model_name}' 未安装！")
+                print("=" * 60)
+                print("请先运行以下命令安装该模型：")
+                print(f"  ollama pull {model_name}")
+                print("=" * 60)
+                self.vl_model_ollama = None
+                return False
+            
             from langchain_ollama import ChatOllama
             self.vl_model_ollama = ChatOllama(
                 model=model_name,

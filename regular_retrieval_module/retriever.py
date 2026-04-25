@@ -7,15 +7,15 @@ from typing import List, Dict, Any, Optional
 from PIL import Image
 import requests
 
-from .text_encoder import TaiyiTextEncoder
-from .image_encoder import CLIPImageEncoder
+from .text_encoder import ChineseRobertaTextEncoder
+from .image_encoder import ClipViTImageEncoder
 from .offline_indexer import OfflineIndexer
 
 
 class Retriever:
     """在线检索器，执行文本到图像的检索"""
     
-    def __init__(self, text_encoder: TaiyiTextEncoder, image_encoder: CLIPImageEncoder, 
+    def __init__(self, text_encoder: ChineseRobertaTextEncoder, image_encoder: ClipViTImageEncoder,
                  offline_indexer: OfflineIndexer):
         self.text_encoder = text_encoder
         self.image_encoder = image_encoder

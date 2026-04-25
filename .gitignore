@@ -46,3 +46,6 @@ run_result_*/
 # Ollama models (don't commit models)
 ollama/
 models/
+
+# fixing process files
+fix/

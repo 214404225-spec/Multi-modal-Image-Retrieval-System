@@ -2,29 +2,47 @@
 常规检索模块的常量定义
 """
 
-# Taiyi-CLIP模型配置
-TAIYI_CLIP_MODEL_NAME = "IDEA-CCNL/Taiyi-CLIP-Roberta-large-326M-Chinese"
+import os
 
-# OpenAI CLIP模型配置
-CLIP_MODEL_NAME = "openai/clip-vit-large-patch14"
+# ============================================================
+# 模型配置说明
+# ============================================================
+# Chinese_roberta: Taiyi-CLIP 的文本编码器，基于 RoBERTa 架构，专为中文优化
+# clip_ViT:    Taiyi-CLIP 的图像编码器，基于 CLIP ViT 架构，用于图像特征提取
+# ============================================================
+
+# 项目根目录
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# 模型标识符
+# Chinese_roberta文本编码器模型标识
+CHINESE_ROBERTA_MODEL_ID = "IDEA-CCNL/Taiyi-CLIP-Roberta-large-326M-Chinese"
+
+# clip_ViT图像编码器模型标识
+CLIP_VIT_MODEL_ID = "openai/clip-vit-large-patch14"
 
 # HuggingFace国内镜像源配置（推荐按顺序尝试）
 HF_MIRROR_URLS = [
     "https://huggingface.co",          # 官方源
-    "https://hf-mirror.com",           # 镜像1
+    "https://hf-mirror.com",           # 镜像
 ]
 
 # ModelScope镜像源配置（备用方案，国内更稳定）
 MODELSCOPE_ENDPOINT = "https://api-inference.modelscope.cn"
 
 # 下载超时设置（秒）
-HF_DOWNLOAD_TIMEOUT = 120  # 增加到120秒
+HF_DOWNLOAD_TIMEOUT = 120
 
-# 本地模型缓存路径配置（可选，设置为None则使用默认缓存路径）
-# 示例: {"taiyi_clip": "D:/models/taiyi_clip", "clip_vit": "D:/models/clip_vit"}
+# ============================================================
+# 本地模型缓存路径配置
+# ============================================================
+# 说明：系统优先从以下路径加载本地模型，无需联网
+# 如果路径不存在，请先运行以下命令下载模型：
+#   python scripts/download_models.py --output-dir ./models
+# ============================================================
 LOCAL_MODEL_CACHE = {
-    'taiyi_clip': 'C:/Users/21440/.cache/huggingface/hub/models--IDEA-CCNL--Taiyi-CLIP-Roberta-large-326M-Chinese/snapshots/2d54979689151036d4624e20e5f104cf73eadcf1',
-    'clip_vit': 'C:/Users/21440/.cache/huggingface/hub/models--openai--clip-vit-large-patch14/snapshots/32bd64288804d66eefd0ccbe215aa642df71cc41'
+    'Chinese_RoBERTa': os.path.join(PROJECT_ROOT, 'models', 'Chinese_RoBERTa'),
+    'clip_ViT': os.path.join(PROJECT_ROOT, 'models', 'clip_ViT'),
 }
 
 # 默认检索参数

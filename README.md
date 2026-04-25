@@ -1,6 +1,6 @@
 # 多模态图像检索系统 (Multi-Modal Image Retrieval System)
 
-基于 LangGraph + Ollama 搭建的智能多模态图像检索系统，支持自然语言查询、意图识别、两阶段检索（粗检索+精排序）等功能。
+基于 LangGraph 搭建的智能多模态图像检索系统，支持自然语言查询、意图识别、两阶段检索（粗检索+精排序）等功能。
 
 ## 系统架构
 
@@ -31,6 +31,7 @@ Qwen2.5-3B 意图识别 (Ollama)
 - **双路检索**：常规检索（泛化匹配）+ 细粒度检索（精确匹配）
 - **本地部署**：所有模型均可本地运行，无需外部 API
 - **模块化设计**：采用包结构组织代码，便于维护和扩展
+- **离线模型加载**：支持预下载模型到本地，启动无需联网
 
 ## 文件结构
 
@@ -46,8 +47,8 @@ pipeline/
 ├── regular_retrieval_module/      # 常规检索模块包
 │   ├── __init__.py
 │   ├── constants.py               # 常量定义
-│   ├── text_encoder.py            # Taiyi文本编码器
-│   ├── image_encoder.py           # CLIP图像编码器
+│   ├── text_encoder.py            # 中文RoBERTa文本编码器
+│   ├── image_encoder.py           # clip_ViT图像编码器
 │   ├── offline_indexer.py         # 离线索引器
 │   ├── attribute_refiner.py       # 属性精排序器
 │   ├── retriever.py               # 检索器
@@ -87,10 +88,10 @@ pipeline/
 
 ## 安装
 
-### 1. 安装 Ollama 和模型
+### 1. Ollama 模型部署
 
 ```bash
-# 国内镜像源设置：
+# 国内镜像源备选：
 set OLLAMA_REGISTRY_MIRROR=https://ollama.modelscope.cn
 
 # 拉取 Qwen2.5-3B 模型
@@ -111,7 +112,6 @@ pip install -r requirements.txt
 ### 交互式对话
 
 ```bash
-cd pipeline
 python -m agent_pipeline.main
 ```
 
@@ -141,10 +141,10 @@ python -m test_20_queries.main
 ### 2. 常规检索模块 (`regular_retrieval_module/`)
 
 适用于**无数量词**的泛化查询：
-- **文本编码器**：Taiyi-CLIP-Roberta（中文优化）
-- **图像编码器**：CLIP-ViT-Large
-- **离线阶段**：图像库 → CLIP图像编码器 → 离线向量库
-- **在线阶段**：查询 → Taiyi-CLIP文本编码 → 相似度计算 → 检索
+- **中文RoBERTa文本编码器**：基于 Taiyi-CLIP-Roberta，专为中文语义理解优化
+- **clip_ViT图像编码器**：基于 CLIP-ViT-Large，用于图像特征提取
+- **离线阶段**：图像库 → clip_ViT图像编码器 → 离线向量库
+- **在线阶段**：查询 → 中文RoBERTa文本编码 → 相似度计算 → 检索
 - **属性精排序**：支持根据属性条件对结果进行重排序
 
 ### 3. 细粒度检索模块 (`fine_grained_retrieval_module/`)
@@ -309,11 +309,63 @@ def refine(self, results, category, attributes, top_k=None, alpha=0.4, beta=0.6)
 - **Qwen2.5-3B**：意图识别大模型
 - **Qwen2.5-VL**：视觉语言模型
 - **CLIP**：图像-文本匹配模型
-- **Taiyi-CLIP**：中文优化的 CLIP 文本编码器
+- **中文RoBERTa**：Taiyi-CLIP 的文本编码器，基于 RoBERTa 架构，专为中文优化
+- **clip_ViT**：Taiyi-CLIP 的图像编码器，基于 CLIP ViT 架构
+
+## 模型下载与本地部署
+
+系统支持将预训练模型下载到本地，后续启动无需联网。所有模型均可通过 `scripts/download_models.py` 脚本下载。
+
+### 支持的模型列表
+
+| 模型名称 | 用途 | 下载命令 |
+|---------|------|---------|
+| `Chinese_RoBERTa` | 中文文本编码（Taiyi-CLIP文本编码器） | `python scripts/download_models.py --model Chinese_RoBERTa` |
+| `clip_ViT` | 图像编码（Taiyi-CLIP图像编码器） | `python scripts/download_models.py --model clip_ViT` |
+| `qwen2.5:3b` | 意图识别（Ollama） | `ollama pull qwen2.5:3b` |
+| `qwen2.5vl:3b` | 视觉语言模型（Ollama） | `ollama pull qwen2.5vl:3b` |
+
+### 下载模型
+
+```bash
+# 使用国内镜像源下载所有模型（推荐）
+python scripts/download_models.py --output-dir ./models
+
+# 下载单个模型
+python scripts/download_models.py --model Chinese_RoBERTa
+python scripts/download_models.py --model clip_ViT
+
+# 使用官方源下载
+python scripts/download_models.py --mirror official
+```
+
+### 验证本地模型
+
+```bash
+# 仅验证已下载的模型
+python scripts/download_models.py --verify-only
+```
+
+### 配置本地模型路径
+
+在 `regular_retrieval_module/constants.py` 中配置本地模型缓存路径：
+
+```python
+LOCAL_MODEL_CACHE = {
+    'Chinese_RoBERTa': './models/Chinese_RoBERTa',  # 中文文本编码器
+    'clip_ViT': './models/clip_ViT',                # 图像编码器
+}
+```
+
+### 模型加载说明
+
+- **Chinese_RoBERTa文本编码器**：模型来源为 `IDEA-CCNL/Taiyi-CLIP-Roberta-large-326M-Chinese`，这是一个纯文本的 RoBERTa 模型（非 CLIP 模型），专为中文语义理解优化。使用 `[CLS]` token 的输出作为句子特征表示。启动时会自动检测本地模型，若未找到则尝试从网络下载。
+- **clip_ViT图像编码器**：基于 CLIP-ViT-Large，用于图像特征提取。
+- 建议首次运行前下载模型到本地，避免网络问题导致加载失败。
 
 ## 注意事项
 
-1. 首次运行会自动下载模型文件，请确保网络连接正常
+1. 首次运行前建议下载模型到本地，避免网络问题导致加载失败
 2. 使用 CUDA GPU 可显著提升推理速度
 3. 图像检索需要预先建立离线索引（`offline_indexing` 方法）
 4. 测试脚本中的图像路径为示例，实际使用需替换为真实图像路径
