@@ -5,7 +5,7 @@
 
 import os
 import glob
-from typing import List, Tuple
+from typing import List
 
 # 支持的图像格式扩展名
 _IMAGE_EXTENSIONS = ["*.jpg", "*.jpeg", "*.png", "*.JPG", "*.JPEG", "*.PNG"]
@@ -35,31 +35,3 @@ def get_image_counts(image_paths: List[str]) -> int:
     return len(image_paths)
 
 
-def split_for_indexing(
-    image_paths: List[str],
-    regular_size: int = -1,
-    fine_grained_size: int = 20,
-) -> Tuple[List[str], List[str]]:
-    """
-    根据配置切分两个检索模块的图像采样。
-
-    Args:
-        image_paths: 全部图像路径列表
-        regular_size: 常规检索模块索引数量，-1 表示全部
-        fine_grained_size: 细粒度检索模块索引数量，默认 20
-
-    Returns:
-        (regular_paths, fine_grained_paths) 两个采样路径列表
-    """
-    total = len(image_paths)
-    if total == 0:
-        return [], []
-
-    if regular_size < 0 or regular_size > total:
-        regular_size = total
-    if fine_grained_size > total:
-        fine_grained_size = total
-
-    regular_paths = image_paths[:regular_size]
-    fine_grained_paths = image_paths[:fine_grained_size]
-    return regular_paths, fine_grained_paths

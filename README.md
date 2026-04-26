@@ -1,110 +1,233 @@
 # 多模态图像检索系统 (Multi-Modal Image Retrieval System)
 
-基于 LangGraph 搭建的智能多模态图像检索系统，支持自然语言查询、意图识别、两阶段检索（粗检索+精排序）等功能。
+基于程序化路由编排的多模态图像检索系统，支持自然语言查询、LLM 意图识别、两阶段检索（粗排 CLIP + 精排 VL_Refine）。路由决策由代码确定性执行，LLM 专注于意图理解、视觉精排和回复生成。
 
-## 系统架构
+## 核心特性
+
+- **自然语言交互，无需关键词匹配**
+- **智能意图识别**：LLM 自动提取类别、数量、检索方式、属性条件。模型通过 `INTENT_MODEL` 环境变量配置（默认 `qwen3:8b`，推荐 `qwen3:14b`）
+- **两阶段检索**：粗排（CLIP 类别匹配）+ 精排（VL 模型逐一验证属性条件）
+- **VL 精排**：VL 模型对候选图像验证属性（颜色、姿态、场景等），加权融合分数。模型通过 `VL_MODEL` 环境变量配置（默认 `qwen3-vl:8b`）
+- **程序化路由**：路由决策由代码确定性执行（`if attributes:`），不依赖 LLM 自行选择，消除小模型路由不可靠的问题
+- **中→英翻译层**：CLIP 为英文模型，查询编码前自动将中文关键词翻译为英文以提升检索准确度
+- **共享离线管线**：常规检索与细粒度检索共用 CLIP 图像编码器构建的离线向量库
+- **本地优先，云端可选**：默认全本地运行，模型可升级（见下方「架构演进」）
+
+## 系统总体架构
 
 ```
 用户输入 Query
     ↓
-Qwen2.5-3B 意图识别 (Ollama)
+LLM 意图识别 (Ollama — INTENT_MODEL 可配置)
     ↓
-├── 类别 + 数量 + 检索方式 + 属性条件
+├── 类别 + 数量 + 属性条件
     ↓
-智能路由
-├── 有数量 → 细粒度检索模块
-├── 无数量 → 常规检索模块
-└── 不需要检索 → 直接回复
-    ↓
-两阶段检索（如有属性条件）
-├── 第一阶段：粗检索（类别匹配）
-└── 第二阶段：精排序（属性重排序）
-    ↓
-返回检索结果
+HasAttr?（代码决策，非 LLM 路由）
+├── 否 → 常规检索
+│        └── 中→英翻译 → CLIP文本编码 → 相似度计算 → 按数量Top-K
+│
+└── 是 → 细粒度两阶段检索
+         ├── 粗排：中→英翻译 → CLIP文本编码 → VectorDB相似度 → TopK/卡阈值
+         └── 精排：VL 模型逐一验证属性条件 → 硬过滤 → 加权融合 → Top-K
+
+图像库 → CLIP图像编码器 → 离线向量库（共享）
+         ↑ 中→英翻译层（CLIP为英文模型）
 ```
 
-## 核心特性
+## 技术栈
 
-- **智能意图识别**：使用 Ollama 本地运行 Qwen2.5-3B，自动提取类别、数量、检索方式、属性条件
-- **两阶段检索**：粗检索（类别匹配）+ 精排序（属性重排序）
-- **零样本泛化**：利用 CLIP 的零样本能力检索未见类别
-- **双路检索**：常规检索（泛化匹配）+ 细粒度检索（精确匹配）
-- **本地部署**：所有模型均可本地运行，无需外部 API
-- **模块化设计**：采用包结构组织代码，便于维护和扩展
-- **离线模型加载**：支持预下载模型到本地，启动无需联网
+- **LangChain**：LLM 调用和链式封装
+- **Ollama**：本地 LLM 运行环境
+- **Qwen3**：意图识别（可配置，默认 `qwen3:8b`）
+- **Qwen2.5-VL / Qwen3-VL**：视觉语言模型，VL_Refine 精排（可配置）
+- **CLIP (ViT-L/14)**：图像-文本匹配模型（粗排 + 离线编码）
+- **PyTorch / Transformers**：深度学习推理框架
 
-## 文件结构
+## 模块说明
+
+### 1. 意图识别模块 (`intent_module/`)
+
+使用 Qwen2.5-3B 模型分析用户查询，自动提取以下信息：
+- **是否需要检索**：是/否
+- **检索类别**：如"狗"、"熊"、"键盘"等（支持开放类别识别）
+- **检索数量**：具体数字（如"2"）或模糊描述（如"很多"）
+- **检索方式**：TopK（具体数字）或 卡阈值（模糊数量）
+- **属性条件**：如"棕色"、"站立"、"清晰"、"全身"等颜色、姿态、场景描述
+
+### 2. 常规检索模块 (`regular_retrieval_module/`)
+
+适用于**无属性条件**的查询（如"狗的图片"、"2只猫"）：
+- **CLIP 图像编码器**：基于 CLIP-ViT-Large，用于离线图像特征提取
+- **离线阶段**：图像库 → CLIP 图像编码器 → 离线向量库
+- **在线阶段**：查询 → CLIP 文本编码器 → 相似度计算 → 按数量 Top-K 返回
+
+### 3. 细粒度检索模块 (`fine_grained_retrieval_module/`)
+
+适用于**有属性条件**的查询（如"棕色的狗"、"站立的熊"），采用两阶段架构：
+
+- **离线阶段**：图像库 → CLIP 图像编码器 → 离线向量库（与常规模块共享同一条管线）
+- **在线粗排**：查询 → CLIP 文本编码器 → 相似度计算 → 检索策略（TopK / 卡阈值）
+- **在线精排（VL_Refine）**：使用 Qwen2.5-VL 对粗排候选图像逐一验证属性条件，返回 0~1 的匹配分数，与粗排分数加权融合后重排序
+- 新增**硬过滤机制**
+
+### 4. 程序化路由编排
+
+路由逻辑位于 `agent_pipeline/pipeline.py` 的 `chat()` 方法中，由代码确定性执行：
+
+1. `IntentRecognitionModule.analyze_intent()` 解析用户查询
+2. `need_retrieval=False` → 直接回复"不需要检索"
+3. `attributes` 非空 → 细粒度两阶段检索（自动触发 VL_Refine）
+4. `attributes` 为空 → 常规检索（单阶段 CLIP）
+
+LLM 不参与路由决策，只负责意图识别、VL 精排和回复格式化三个核心环节。
+
+## 架构演进：本地模型 → SOTA 多模态 API
+
+当前系统默认使用本地小模型（qwen2.5:3b + qwen2.5vl:3b），核心瓶颈在 **VL 精排**：3B 参数的视觉语言模型对细粒度属性（"站立"、"棕色"、"室外"）的判断能力有限，经常给出全 0 的评分，导致细粒度检索路径几乎不可用。
+
+### 理想架构：CLIP + SOTA 多模态 API 混合
+
+如果接入 Claude Opus 4.7 / GPT-4o / Gemini 2.5 Pro 等云端多模态 API，架构变为：
 
 ```
-pipeline/
-├── intent_module/                 # 意图识别模块包
-│   ├── __init__.py
-│   ├── constants.py               # 常量定义（中文数字映射）
-│   ├── prompt_template.py         # Prompt模板
-│   ├── parser.py                  # 输出解析器
-│   └── module.py                  # 主模块类
-│
-├── regular_retrieval_module/      # 常规检索模块包
-│   ├── __init__.py
-│   ├── constants.py               # 常量定义
-│   ├── text_encoder.py            # 中文RoBERTa文本编码器
-│   ├── image_encoder.py           # clip_ViT图像编码器
-│   ├── offline_indexer.py         # 离线索引器
-│   ├── attribute_refiner.py       # 属性精排序器
-│   ├── retriever.py               # 检索器
-│   └── module.py                  # 主模块类
-│
-├── fine_grained_retrieval_module/ # 细粒度检索模块包
-│   ├── __init__.py
-│   ├── constants.py               # 常量定义
-│   ├── vl_models.py               # VL模型管理器
-│   ├── clip_encoder.py            # CLIP编码器
-│   ├── offline_indexer.py         # 离线索引器
-│   ├── attribute_refiner.py       # 属性精排序器
-│   ├── online_retriever.py        # 在线检索器
-│   └── module.py                  # 主模块类
-│
-├── agent_pipeline/                # Agent编排包
-│   ├── __init__.py
-│   ├── tools.py                   # 工具定义
-│   ├── pipeline.py                # 主流程
-│   └── main.py                    # 交互入口
-│
-├── test_20_queries/               # 测试包
-│   ├── __init__.py
-│   ├── test_data.py               # 测试数据
-│   ├── runner.py                  # 测试运行器
-│   └── main.py                    # 测试入口
-│
-├── requirements.txt               # Python 依赖
-└── README.md                      # 项目说明
+用户查询 → 多模态 API（意图理解，结构化输出，无需 parser）
+                ↓
+         CLIP 粗排（本地，毫秒级扫 2000 张）
+                ↓
+         Top-K 候选（~10 张）→ 多模态 API 精排
+                ↓
+         多模态 API 格式化回复
 ```
 
-## 环境要求
+**CLIP 仍然保留**做粗筛（本地、快速、零成本），**多模态 API 替代小模型**做精排和理解。这是“本地负责快，云端负责准”的混合策略。
 
-- Python 3.9+
-- Ollama（用于运行 Qwen2.5-3B, Qwen2.5-VL-3B）
-- CUDA GPU（可选，用于加速模型推理）
+### 对比
 
-## 安装
+| 维度 | 当前（qwen2.5vl:3b 本地） | SOTA 多模态 API |
+|------|--------------------------|----------------|
+| VL 精排准确度 | 3B 小模型，属性判断不稳定 | 极高，能区分"站立"vs"坐着"、"棕色"vs"褐色" |
+| 意图理解 | 不可靠，需要 parser 多层回退 + 代码修补 | 一次调用，结构化输出，无需 parser |
+| 复杂查询 | 只能处理简单属性 | 能理解"草地上奔跑的金毛犬"等多条件组合 |
+| 延迟（精排） | 每张 ~30s（本地推理） | 每张 ~1-2s（网络 + 推理） |
+| 成本 | 零（本地 GPU） | 按 token 计费，每次查询约几分钱 |
+| 隐私 | 图片不出本地 | 图片上传云端（精排阶段） |
 
-### 1. Ollama 模型部署
+### 切换方式
 
-```bash
-# 国内镜像源备选：
-set OLLAMA_REGISTRY_MIRROR=https://ollama.modelscope.cn
+1. 环境变量改为 API 模型名
+2. 将 `ChatOllama` 替换为对应的 API ChatModel（如 `ChatAnthropic`）
+3. VL 精排阶段改为将 base64 图片发送至 API 进行评分
+4. 粗排（CLIP）和离线索引保持不变
 
-# 拉取 Qwen2.5-3B 模型
-ollama pull qwen2.5:3b
+### 模型升级（本地方案）
 
-# 拉取 Qwen2.5-VL 多模态模型（若没有拉取，会使用Transformers拉取）
-ollama pull qwen2.5vl:3b
+在不引入外部 API 的情况下，也可以升级本地模型以获得可观改善：
+
+```powershell
+# 拉取模型（默认已使用 qwen3:8b + qwen3-vl:8b，以下为更高配置）
+ollama pull qwen3:14b
+ollama pull qwen3-vl:8b
+
+# 切换
+$env:INTENT_MODEL="qwen3:14b"
+$env:VL_MODEL="qwen3-vl:8b"
 ```
 
-### 2. 安装 Python 依赖
+Qwen3 系列在中文理解、指令遵循和视觉推理上相比 Qwen2.5-3B 有质的提升，但精排准确度仍远不及 SOTA API。
+
+## 工业落地的微调策略
+
+将系统拆分为三个可独立微调的组件，工业界对各组件的微调投入差异显著：
+
+### CLIP 编码器：最值得微调
+
+工业界对 CLIP 做领域微调是**标准操作**。CLIP 的通用预训练数据（LAION-400M）与实际业务图像分布存在 domain gap：
+
+- **电商**：商品图是白底棚拍，CLIP 预训练数据中大量是自然场景，零样本精度可能掉 10-20 个点
+- **安防**：监控视角、低分辨率、红外图像，CLIP 预训练几乎未覆盖
+- **医疗**：CT/X 光与自然图像的特征分布完全不同，不微调不可用
+
+| 方法 | 成本 | 效果 | 适用场景 |
+|------|:---:|:---:|------|
+| LoRA 微调 CLIP 图像塔 | 低（4K 图即可） | +5-10% F1 | 领域图像分布偏移 |
+| 对比学习续训 | 中（需 10K+ 图文对） | +8-15% F1 | 有大量领域标注 |
+| 全量微调 | 高（需 50K+ 图文对） | +10-20% F1 | 极端 domain gap（医疗等） |
+
+### VL 精排模型：通常不微调
+
+工业界对 VL 精排阶段的模型一般**不做微调**：
+
+1. VL 做的是二分类验证（是/否），不是开放域理解——这个任务对预训练 VL 已经足够简单，微调收益有限
+2. VL 模型参数量大（3B-8B），微调需要大量图像+属性标注数据，ROI 低
+3. 与其微调 VL，不如把算力投到 CLIP 粗排上——粗排召回率提升 5%，对最终效果的影响远大于 VL 精度提升 5%
+
+工业界的真实做法是：**VL 精排精度不够 → 换更强的 VL 模型**（如本地 Qwen3-VL → 云端 GPT-4o），而不是微调。这也是为什么上方「架构演进」中将 "CLIP 本地粗排 + SOTA API 精排" 列为理想架构。
+
+### 意图识别 LLM：看场景
+
+| 做法 | 场景 |
+|------|------|
+| 不微调，用大模型 | 查询多样性高、长尾表达多，直接用 GPT-4o / Qwen3-14B 的零样本能力 |
+| 微调小模型 | 查询模式固定（如电商搜索总是"颜色+品类+款式"），微调 1-3B 模型做专用意图识别，成本低、延迟低 |
+| 用 API + 结构化输出 | 最主流——GPT-4o 的 structured output / function calling 已经足够可靠，不再需要自己微调 |
+
+本项目当前的 prompt 模板 + parser 多层回退本质是 prompt engineering 方案，工业界更倾向用大模型 API 的 native structured output 替代手写 parser。
+
+### 总结
+
+```
+值得微调的：  CLIP 编码器       ← 领域适应，ROI 最高
+通常不微调的： VL 精排模型       ← 换更大模型比微调划算
+看情况的：    意图识别 LLM       ← API 足够好就用 API，固定场景才微调小模型
+```
+
+## 环境配置
 
 ```bash
 pip install -r requirements.txt
+```
+
+## 模型本地部署
+
+为了避免网络问题导致的报错，建议预先下载所有要用到的模型。
+
+### 支持的模型列表
+
+| 模型名称 | 用途 | 下载命令 |
+|---------|------|---------|
+| `clip_ViT` | CLIP 图像编码（离线向量库构建） | `python scripts/download_models.py --model clip_ViT` |
+| `qwen2.5:3b` | 意图识别（Ollama） | `ollama pull qwen2.5:3b` |
+| `qwen2.5vl:3b` | VL_Refine 精排（Ollama） | `ollama pull qwen2.5vl:3b` |
+
+### 下载模型
+
+#### Ollama 
+
+```bash
+# 国内镜像源
+set OLLAMA_REGISTRY_MIRROR=https://ollama.modelscope.cn
+
+# Qwen2.5-3B 
+ollama pull qwen2.5:3b
+
+# Qwen2.5-VL
+ollama pull qwen2.5vl:3b
+```
+
+#### clip_ViT & Chinese_RoBERTa
+
+```bash
+# 使用国内镜像源下载所有模型（推荐）
+python scripts/download_models.py --output-dir ./models
+
+# 下载单个模型
+python scripts/download_models.py --model clip_ViT
+
+# 使用官方源下载
+python scripts/download_models.py --mirror official
+
+# 验证已下载的模型
+python scripts/download_models.py --verify-only
 ```
 
 ## 使用方法
@@ -116,260 +239,17 @@ python -m agent_pipeline.main
 ```
 
 输入自然语言查询，例如：
-- "帮我找两只狗的图片"
-- "找很多熊的照片"
-- "搜索狗的图片"
-- "找10张狗的全身图片"
+- "帮我找棕色的狗的图片"（有属性条件 → 细粒度两阶段检索 + VL_Refine）
+- "找站立的熊的照片"（有属性条件 → 细粒度两阶段检索 + VL_Refine）
+- "搜索狗的图片"（无属性条件 → 常规检索）
+- "找2只猫的图片"（无属性条件 → 常规检索，按数量 Top-K）
 
-### 运行测试
-
-```bash
-python -m test_20_queries.main
-```
-
-## 模块说明
-
-### 1. 意图识别模块 (`intent_module/`)
-
-使用 Qwen2.5-3B 模型分析用户查询，自动提取以下信息：
-- **是否需要检索**：是/否
-- **检索类别**：如"狗"、"熊"、"键盘"等（支持开放类别识别）
-- **检索数量**：具体数字（如"2"）或模糊描述（如"很多"）
-- **检索方式**：TopK（具体数字）或 卡阈值（模糊数量）
-- **属性条件**：如"棕色"、"站立"、"清晰"、"全身"等
-
-### 2. 常规检索模块 (`regular_retrieval_module/`)
-
-适用于**无数量词**的泛化查询：
-- **中文RoBERTa文本编码器**：基于 Taiyi-CLIP-Roberta，专为中文语义理解优化
-- **clip_ViT图像编码器**：基于 CLIP-ViT-Large，用于图像特征提取
-- **离线阶段**：图像库 → clip_ViT图像编码器 → 离线向量库
-- **在线阶段**：查询 → 中文RoBERTa文本编码 → 相似度计算 → 检索
-- **属性精排序**：支持根据属性条件对结果进行重排序
-
-### 3. 细粒度检索模块 (`fine_grained_retrieval_module/`)
-
-适用于**有数量词**的精确查询：
-- **离线阶段**：图像库 → Qwen2.5-VL → 类别标签+数量 → CLIP文本编码 → 离线向量库
-- **在线阶段**：查询 → CLIP文本编码 → 相似度计算 → 检索
-- **核心功能**：
-  - 零样本泛化：支持检索未见类别
-  - 属性精排序：根据属性条件重排序结果
-  - Ollama VL 支持：可通过 Ollama 调用 Qwen2.5-VL
-
-### 4. Agent 主流程 (`agent_pipeline/`)
-
-使用 LangGraph ReAct Agent 编排：
-1. 调用意图识别工具分析查询
-2. 根据意图结果自动路由到合适的检索模块
-3. 如有属性条件，自动执行两阶段检索
-4. 组织结果并回复用户
-
-## 查询格式
-
-### 常规查询
-```
-"帮我找狗的图片"
-"搜索包含熊的图像"
-```
-
-### 带数量的查询
-```
-"帮我找两只狗的图片"
-"找5个键盘的图片"
-"找很多熊的照片"
-```
-
-### 带属性条件的查询
-```
-"帮我找10张狗的全身图片"
-"找5只棕色的猫"
-"给我看一些清晰的键盘照片"
-```
-
-## 路由逻辑
-
-| 查询类型 | 示例 | 路由目标 |
-|---------|------|---------|
-| 具体数量 | "两只狗"、"3个键盘" | 细粒度检索 (TopK) |
-| 模糊数量 | "很多狗"、"一些熊" | 细粒度检索 (卡阈值) |
-| 无数量词 | "狗的图片" | 常规检索 |
-| 不需要检索 | "你好"、"谢谢" | 直接回复 |
-
-## 属性条件两阶段检索
-
-### 整体流程
-
-```
-用户输入："帮我找10张狗的全身图片，要清晰的"
-    ↓
-意图识别提取：category="狗", count=10, attributes=["全身", "清晰"]
-    ↓
-┌─────────────────────────────────────────────────┐
-│ 第一阶段：粗检索（类别匹配）                      │
-│ - 使用类别"狗"构建查询文本                        │
-│ - CLIP编码查询文本和图像库                        │
-│ - 计算相似度，召回候选结果                        │
-└─────────────────────────────────────────────────┘
-    ↓
-┌─────────────────────────────────────────────────┐
-│ 第二阶段：精排序（属性重排序）                    │
-│ - 使用"狗的全身、清晰"构建属性查询                │
-│ - 重新计算与属性条件的相似度                      │
-│ - 按融合分数重排序，返回TopK结果                  │
-└─────────────────────────────────────────────────┘
-```
-
-### 第一阶段：粗检索（类别匹配）
-
-**实现位置**：
-- 细粒度模块：`fine_grained_retrieval_module/online_retriever.py` 的 `retrieve()` 方法
-- 常规模块：`regular_retrieval_module/retriever.py` 的 `retrieve()` 方法
-
-**核心逻辑**：
-```python
-# 1. 构建搜索查询文本（仅使用类别）
-search_query = f"{target_count}个{category}"  # 如 "10个狗"
-# 或
-search_query = f"包含{category}的图片"  # 如 "包含狗的图片"
-
-# 2. CLIP编码查询文本
-query_feature = self.clip_encoder.encode_text(search_query)
-
-# 3. 遍历离线向量库，计算余弦相似度
-for path, data in self.offline_indexer.get_db().items():
-    db_vector = data["vector"]
-    similarity = (query_feature @ db_vector.t()).item()
-    results.append({"url": path, "score": similarity, ...})
-
-# 4. 按分数排序并根据检索方式筛选
-results = sorted(results, key=lambda x: x["score"], reverse=True)
-if method == "TopK":
-    results = results[:top_k]
-```
-
-**特点**：
-- 使用类别进行语义匹配，不依赖精确标签
-- 支持零样本泛化（未见类别也能检索）
-- 返回初步排序的候选结果列表
-
-### 第二阶段：精排序（属性重排序）
-
-**实现位置**：
-- 细粒度模块：`fine_grained_retrieval_module/attribute_refiner.py`
-- 常规模块：`regular_retrieval_module/attribute_refiner.py`
-
-**核心逻辑**：
-```python
-def refine(self, results, category, attributes, top_k=None, alpha=0.4, beta=0.6):
-    # 1. 构建属性查询文本：类别 + 属性组合
-    attr_query = f"{category}的{'、'.join(attributes)}"
-    # 例如："狗的全身、清晰"
-    
-    # 2. 使用CLIP编码属性查询
-    query_feature = self.clip_encoder.encode_text(attr_query)
-    
-    # 3. 对粗检索结果重新计算相似度
-    for r in results:
-        img_feat = self.clip_encoder.encode_image(r["url"])
-        attr_score = (query_feature @ img_feat.t()).item()
-        r["attr_score"] = attr_score  # 存储属性分数
-        
-        # 4. 加权融合分数
-        category_score = r.get("score", 0)
-        r["final_score"] = alpha * category_score + beta * attr_score
-    
-    # 5. 按融合分数重排序
-    refined = sorted(results, key=lambda x: x.get("final_score", 0), reverse=True)
-    return refined[:top_k] if top_k else refined
-```
-
-**特点**：
-- 在粗检索结果基础上进行二次排序
-- 使用更具体的属性描述文本重新编码
-- 采用加权融合：`final_score = 0.4 * category_score + 0.6 * attr_score`
-- 既保留类别相关性，又突出属性条件的匹配度
-
-### Agent自动传递属性条件
-
-**工具定义**（`agent_pipeline/tools.py`）：
-- 常规检索工具：输入格式 `'中文查询|属性1|属性2'`
-- 细粒度检索工具：输入格式 `'类别,检索方式,数量,属性1|属性2'`
-
-**System Prompt指导**（`agent_pipeline/pipeline.py`）：
-- Agent会自动从IntentRecognition结果中提取属性条件
-- 如果属性条件为"无"或空，则省略属性部分
-- 如果属性条件有值，则自动附加到检索参数中
-
-## 技术栈
-
-- **LangGraph**：Agent 编排框架
-- **LangChain**：工具封装和链式调用
-- **Ollama**：本地 LLM 运行环境
-- **Qwen2.5-3B**：意图识别大模型
-- **Qwen2.5-VL**：视觉语言模型
-- **CLIP**：图像-文本匹配模型
-- **中文RoBERTa**：Taiyi-CLIP 的文本编码器，基于 RoBERTa 架构，专为中文优化
-- **clip_ViT**：Taiyi-CLIP 的图像编码器，基于 CLIP ViT 架构
-
-## 模型下载与本地部署
-
-系统支持将预训练模型下载到本地，后续启动无需联网。所有模型均可通过 `scripts/download_models.py` 脚本下载。
-
-### 支持的模型列表
-
-| 模型名称 | 用途 | 下载命令 |
-|---------|------|---------|
-| `Chinese_RoBERTa` | 中文文本编码（Taiyi-CLIP文本编码器） | `python scripts/download_models.py --model Chinese_RoBERTa` |
-| `clip_ViT` | 图像编码（Taiyi-CLIP图像编码器） | `python scripts/download_models.py --model clip_ViT` |
-| `qwen2.5:3b` | 意图识别（Ollama） | `ollama pull qwen2.5:3b` |
-| `qwen2.5vl:3b` | 视觉语言模型（Ollama） | `ollama pull qwen2.5vl:3b` |
-
-### 下载模型
+### 运行批量测试示例
 
 ```bash
-# 使用国内镜像源下载所有模型（推荐）
-python scripts/download_models.py --output-dir ./models
-
-# 下载单个模型
-python scripts/download_models.py --model Chinese_RoBERTa
-python scripts/download_models.py --model clip_ViT
-
-# 使用官方源下载
-python scripts/download_models.py --mirror official
+python -m test_queries.main
 ```
 
-### 验证本地模型
 
-```bash
-# 仅验证已下载的模型
-python scripts/download_models.py --verify-only
-```
 
-### 配置本地模型路径
 
-在 `regular_retrieval_module/constants.py` 中配置本地模型缓存路径：
-
-```python
-LOCAL_MODEL_CACHE = {
-    'Chinese_RoBERTa': './models/Chinese_RoBERTa',  # 中文文本编码器
-    'clip_ViT': './models/clip_ViT',                # 图像编码器
-}
-```
-
-### 模型加载说明
-
-- **Chinese_RoBERTa文本编码器**：模型来源为 `IDEA-CCNL/Taiyi-CLIP-Roberta-large-326M-Chinese`，这是一个纯文本的 RoBERTa 模型（非 CLIP 模型），专为中文语义理解优化。使用 `[CLS]` token 的输出作为句子特征表示。启动时会自动检测本地模型，若未找到则尝试从网络下载。
-- **clip_ViT图像编码器**：基于 CLIP-ViT-Large，用于图像特征提取。
-- 建议首次运行前下载模型到本地，避免网络问题导致加载失败。
-
-## 注意事项
-
-1. 首次运行前建议下载模型到本地，避免网络问题导致加载失败
-2. 使用 CUDA GPU 可显著提升推理速度
-3. 图像检索需要预先建立离线索引（`offline_indexing` 方法）
-4. 测试脚本中的图像路径为示例，实际使用需替换为真实图像路径
-
-## 许可证
-
-MIT License

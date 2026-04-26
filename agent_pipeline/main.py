@@ -12,11 +12,12 @@ def main():
     print("多模态图像检索系统")
     print("=" * 50)
     
-    # 初始化 Pipeline（使用 Ollama）
-    pipeline = MultiModalAgentPipeline(model_name="qwen2.5:3b")
+    # 初始化 Pipeline（模型由 INTENT_MODEL / VL_MODEL 环境变量控制）
+    pipeline = MultiModalAgentPipeline()
     
     # 交互式对话
     print("\n输入 'quit' 或 'exit' 退出")
+    print("提示：检索不在常见类别中的物体时，不加属性条件直接走常规检索更高效。")
     while True:
         user_input = input("\nUser: ").strip()
         if user_input.lower() in ['quit', 'exit']:

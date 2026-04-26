@@ -1,125 +1,193 @@
 """
 Agent Pipeline主类
-LangGraph ReAct Agent编排的主流程
+程序化路由编排（对应 v1.md 架构：意图识别 → 判定是否有属性条件 → 路由）
 """
 
 import os
-os.environ["HF_ENDPOINT"] = "https://huggingface.co"
+import re
+os.environ.setdefault("HF_ENDPOINT", "https://huggingface.co")
 
-from langgraph.prebuilt import create_react_agent
 from langchain_core.messages import HumanMessage
 from langchain_ollama import ChatOllama
 
-# 导入我们的自定义模块
 from intent_module import IntentRecognitionModule
+from intent_module.constants import INTENT_MODEL_NAME
 from regular_retrieval_module import RegularRetrievalModule
+from regular_retrieval_module.constants import CLIP_MODEL_PATH
 from fine_grained_retrieval_module import FineGrainedRetrievalModule
-from data_load import discover_image_paths, get_image_counts, split_for_indexing
+from shared.clip_encoder import CLIPEncoder
+from data_load import discover_image_paths, get_image_counts
 
-from .tools import create_tools
+
+def _trim_result_paths(res: dict) -> dict:
+    """将检索结果中的完整路径截短为文件名"""
+    if "results" not in res or not isinstance(res["results"], list):
+        return res
+    trimmed_results = []
+    for r in res["results"]:
+        trimmed = dict(r)
+        if "url" in trimmed:
+            trimmed["url"] = os.path.basename(trimmed["url"])
+        trimmed_results.append(trimmed)
+    return {**res, "results": trimmed_results}
+
+
+def _format_response(llm: ChatOllama, user_query: str,
+                     retrieval_result: dict) -> str:
+    """使用 LLM 将检索结果格式化为用户友好的回复"""
+    results = retrieval_result.get("results", [])
+    if not results:
+        return "未找到匹配的图片。"
+
+    filenames = [r.get("url", "") for r in results]
+    file_list = "\n".join(f"- {name}" for name in filenames if name)
+
+    prompt = (
+        f"用户查询：{user_query}\n\n"
+        f"检索到 {len(filenames)} 张图片：\n{file_list}\n\n"
+        f"请用一句话总结结果，然后列出图片文件名。不要编造链接，直接使用上面给出的文件名。"
+    )
+    try:
+        response = llm.invoke([HumanMessage(content=prompt)])
+        return response.content.strip()
+    except Exception:
+        return f"找到 {len(filenames)} 张图片：\n{file_list}"
 
 
 class MultiModalAgentPipeline:
     """
-    全流程多模态 Agent 工作流。使用 LangChain 的 Tool 封装三种不同的模块。
-    通过 Ollama 本地运行 qwen2.5:3b 模型自主编排调用合适的工具完成复杂的用户查询检索任务。
-    
-    路由逻辑（基于数量明确性路由）：
-    - 有具体数量（如"两只狗"、"3个键盘"）→ 细粒度检索
-    - 有模糊数量（如"很多狗"、"一些熊"）→ 细粒度检索
-    - 无数量词，仅有类别（如"狗的图片"）→ 常规检索
-    - 不需要检索 → 直接回复
+    多模态图像检索流水线（v1.md 架构）：
+
+    路由逻辑（程序化，不由 LLM 决定）：
+    - 意图识别 → 有属性条件 → 细粒度两阶段检索（粗排 CLIP + 精排 VL_Refine）
+    - 意图识别 → 无属性条件 → 常规检索（CLIP 单阶段）
+    - 意图识别 → 不需要检索 → 直接回复
     """
-    def __init__(self, model_name: str = "qwen2.5:3b"):
-        # --- 1. 基础建设：初始化各个检索器模块 ---
-        print(f"[INFO] 使用 Ollama 模型: {model_name}")
-        self.intent_module = IntentRecognitionModule(model_name=model_name)
-        self.regular_retrieval = RegularRetrievalModule()
-        self.fine_grained = FineGrainedRetrievalModule()
-        
-        # 从数据集加载图像
+
+    def __init__(self, model_name: str = None):
+        # 意图识别/回复格式化所用的 LLM（由 INTENT_MODEL 环境变量或常量默认值控制）
+        if model_name is None:
+            model_name = INTENT_MODEL_NAME
+        print(f"[INFO] 意图 LLM: {model_name}")
+
+        self.llm = ChatOllama(model=model_name, temperature=0.0)
+
+        # --- 1. 初始化各模块 ---
+        self.intent_module = IntentRecognitionModule(llm=self.llm)
+
+        shared_clip = CLIPEncoder(clip_vision_path=CLIP_MODEL_PATH)
+        self.regular_retrieval = RegularRetrievalModule(clip_encoder=shared_clip)
+
+        self.fine_grained = FineGrainedRetrievalModule(
+            clip_encoder=shared_clip,
+            offline_indexer=self.regular_retrieval.offline_indexer
+        )
+
+        # --- 2. 加载图像并建索引 ---
         all_image_paths = discover_image_paths()
         total_count = get_image_counts(all_image_paths)
         print(f"[INFO] 图像数据集共 {total_count} 张")
 
-        # 环境变量控制各模块索引数量，-1 表示常规检索默认全部
-        regular_index_size = int(os.environ.get("REGULAR_INDEX_SIZE", "-1"))
-        fine_grained_index_size = int(os.environ.get("FINE_GRAINED_INDEX_SIZE", "20"))
+        try:
+            regular_index_size = int(os.environ.get("REGULAR_INDEX_SIZE", "-1"))
+        except ValueError:
+            print(f"[警告] REGULAR_INDEX_SIZE 值无效，使用默认值 -1（全部图像）")
+            regular_index_size = -1
 
-        regular_paths, fine_grained_paths = split_for_indexing(
-            all_image_paths, regular_index_size, fine_grained_index_size
-        )
+        regular_paths = all_image_paths if regular_index_size < 0 else all_image_paths[:regular_index_size]
 
         if regular_paths:
-            print(f"[INFO] 开始常规检索模块离线索引（共{len(regular_paths)}张，总计{total_count}张可用）...")
+            print(f"[INFO] 开始离线索引（共{len(regular_paths)}张）...")
             self.regular_retrieval.offline_indexing(regular_paths)
         else:
             print(f"[警告] 未找到图像，检索功能将不可用")
 
-        if fine_grained_paths:
-            print(f"[INFO] 开始细粒度检索模块离线索引（共{len(fine_grained_paths)}张，总计{total_count}张可用）...")
-            self.fine_grained.offline_indexing(fine_grained_paths)
+    def chat(self, user_query: str) -> dict:
+        """
+        主入口：程序化路由（对应 v1.md）
 
-        # --- 2. 封装 LangChain Tool ---
-        self.tools = create_tools(self.intent_module, self.regular_retrieval, self.fine_grained)
+        1. 意图识别 → 2. 判定路由 → 3. 检索 → 4. 格式化回复
+        """
+        # Step 1: 意图识别
+        intent = self.intent_module.analyze_intent(user_query)
+        print(f"[意图] {intent.get('need_retrieval')} | "
+              f"类别={intent.get('category')} | "
+              f"属性={intent.get('attributes')} | "
+              f"方式={intent.get('method')} | "
+              f"数量={intent.get('count')}")
 
-        # --- 3. 配置核心大脑：Agent LLM (使用 Ollama) ---
-        self.llm = ChatOllama(
-            model=model_name,
-            temperature=0.0
-        )
-        
-        # --- 4. 配置 Agent 编排框架 (LangGraph ReAct) ---
-        system = '''你是一个高效权威的"多模态视觉检索调度主控"。
-        你的任务是协助用户找到想要的图像。
-        请务必遵循以下步骤逻辑：
-        1. 总是先使用 `IntentRecognition` 判断意图。
-        2. 根据意图识别结果自动路由：
-        - 如果意图结果中"需要检索"为"是"，且"数量"字段有值（具体数字或模糊描述），调用 `FineGrainedRetrieval` 工具。
-          参数格式：'类别,检索方式,数量,属性1|属性2'
-          其中类别、检索方式、数量来自IntentRecognition结果。
-          如果"属性条件"为"无"或空，则省略属性部分，仅传'类别,检索方式,数量'。
-          如果"属性条件"有值（如["棕色", "站立"]），则传'类别,检索方式,数量,棕色|站立'。
-        - 如果意图结果中"需要检索"为"是"，但"数量"字段为"无"或None，调用 `RegularImageRetrieval` 工具。
-          参数格式：'中文查询文本|属性1|属性2'
-          其中查询文本为原始用户查询，属性来自IntentRecognition结果的"属性条件"字段。
-          如果"属性条件"为"无"或空，则仅传查询文本，如'狗的图片'。
-          如果"属性条件"有值，则附加属性，如'狗的图片|棕色|站立'。
-        - 如果意图结果中"需要检索"为"否"，直接结束并回复用户。
-        3. 如果工具返回了结果，组织一句话流畅地回答用户。
-        '''
-        
-        # 使用 LangGraph 的 prebuilt 模块创建 React 模式 Agent 
-        self.agent_executor = create_react_agent(
-            self.llm,
-            tools=self.tools,
-            prompt=system
-        )
+        need_retrieval = intent.get("need_retrieval", False)
+        attributes = intent.get("attributes", [])
+        category = intent.get("category", "")
+        method = intent.get("method", "TopK")
+        count = intent.get("count")
 
-    def chat(self, user_query: str):
-        """主入口"""
-        # LangGraph 的输入格式要求是一个包含人类提问的消息列表或者 dict
-        inputs = {"messages": [HumanMessage(content=user_query)]}
-        
-        # 兼容原来的返回数据结构
-        final_reply = ""
-        
-        # 执行 Agent 节点，只打印关键步骤
-        for chunk in self.agent_executor.stream(inputs, stream_mode="values"):
-            message = chunk["messages"][-1]
-            msg_type = message.type
-            
-            # 只打印工具调用和最终结果
-            if msg_type == "ai":
-                if hasattr(message, 'tool_calls') and message.tool_calls:
-                    for tc in message.tool_calls:
-                        print(f"[Agent 调用工具] {tc['name']}")
-                else:
-                    final_reply = message.content
-            elif msg_type == "tool":
-                # 工具返回只打印简要信息
-                content = str(message.content)[:100]
-                print(f"[工具返回] {content}...")
-            
-        print(f"\n[最终回复] {final_reply}")
-        return {"output": final_reply}
+        # Step 2: 程序化路由（不由 LLM agent 决定）
+        if not need_retrieval:
+            return {"output": "不需要检索。"}
+
+        if not category:
+            # 意图模块未提取到类别，直接用原始查询做常规检索
+            print(f"[路由] 常规检索（无类别，用原始查询）")
+            k = self._extract_count(user_query)
+            res = self.regular_retrieval.retrieve(user_query, method="TopK", top_k=k)
+            res = _trim_result_paths(res)
+            output = _format_response(self.llm, user_query, res)
+            return {"output": output}
+
+        if attributes:
+            # 有属性条件 → 细粒度两阶段检索
+            print(f"[路由] 细粒度检索: {category}, 属性={attributes}, {method}")
+            # 粗排取 count*3 候选（保底 15），留足余量供 VL 精排筛选
+            coarse_k = max((count or 5) * 3, 15) if isinstance(count, int) else 30
+            res = self.fine_grained.online_retrieval(
+                category=category,
+                method=method or "TopK",
+                target_count=count if isinstance(count, int) else None,
+                top_k=coarse_k,
+                attributes=attributes
+            )
+            if "results" in res:
+                res["results"] = self.fine_grained.refine_by_attributes(
+                    res.get("results", []), category, attributes
+                )
+                # TopK + 明确数量时，精排后裁剪到精确数量
+                if method == "TopK" and isinstance(count, int) and count > 0:
+                    if len(res["results"]) > count:
+                        print(f"[路由] 精排后裁剪 {len(res['results'])} → {count} 张")
+                    res["results"] = res["results"][:count]
+                res["refinement_applied"] = True
+                res["refinement_method"] = "VL_Refine"
+            res = _trim_result_paths(res)
+            output = _format_response(self.llm, user_query, res)
+            return {"output": output}
+        else:
+            # 无属性条件 → 常规检索
+            print(f"[路由] 常规检索: {category}, {method}")
+            k = self._resolve_top_k(method, count)
+            res = self.regular_retrieval.retrieve(
+                query=category, method=method or "TopK", top_k=k
+            )
+            res = _trim_result_paths(res)
+            output = _format_response(self.llm, user_query, res)
+            return {"output": output}
+
+    @staticmethod
+    def _extract_count(query: str) -> int:
+        """从查询文本中提取数量，默认返回 5"""
+        m = re.search(r'(\d+)\s*[张只幅个份条]', query)
+        if m:
+            return int(m.group(1))
+        cn_map = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+                  "六": 6, "七": 7, "八": 8, "九": 9, "十": 10, "两": 2}
+        m = re.search(r'([一二三四五六七八九十两]+)\s*[张只幅个份条]', query)
+        if m:
+            return cn_map.get(m.group(1), 5)
+        return 5
+
+    @staticmethod
+    def _resolve_top_k(method: str, count) -> int:
+        """根据检索方式和数量确定 Top-K 值"""
+        if method == "TopK" and isinstance(count, int) and count > 0:
+            return count
+        return 5

@@ -35,11 +35,15 @@ Thumbs.db
 *.ckpt
 *.onnx
 
+# Image_vector Cache
+cache/
+
 # Test images
 test_images/
 
 # Results
 run_result_*/
+test_results.txt
 *.log
 
 # Ollama models (don't commit models)
@@ -49,8 +53,7 @@ models/
 # fixing process files
 fix/
 
-# CLAUDE init
-CLAUDE.md
-
 # Others
 hellcondabinconda-hook.ps1) ; (conda activate MmIRS)
+v1_fix.md
+多模态简历.md

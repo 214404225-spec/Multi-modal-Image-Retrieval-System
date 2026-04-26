@@ -25,8 +25,10 @@ def parse_output(output_text: str, query: str = "") -> Dict[str, Any]:
     text_lower = text.lower()
     
     # 1. 判断是否需要检索
-    is_negative = any(k in text for k in ["不需要", "无需", "无须", "无关", "不用", "否"])
-    is_positive = ("需要" in text or "是" in text) and (not is_negative)
+    # 注意："否" 不能单独匹配，因为"是否"（whether）是中性的
+    is_negative = any(k in text for k in ["不需要", "无需", "无须", "无关", "不用",
+                                            "检索：否", "检索:否"])
+    is_positive = ("需要" in text or "检索：是" in text or "检索:是" in text) and (not is_negative)
     
     if not is_positive and not is_negative:
         if any(k in text_lower for k in ["top", "阈值", "门槛"]):
@@ -38,7 +40,7 @@ def parse_output(output_text: str, query: str = "") -> Dict[str, Any]:
                 
     need_retrieval = is_positive
     
-    # 2. 提取类别 - 直接从LLM输出中解析，不再依赖候选列表
+    # 2. 提取类别 - 直接从LLM输出中解析
     category = None
     if need_retrieval:
         category_match = re.search(r'检索类别[：:]\s*([^\n]+)', text)
@@ -46,6 +48,16 @@ def parse_output(output_text: str, query: str = "") -> Dict[str, Any]:
             category_text = category_match.group(1).strip()
             if category_text != "无":
                 category = category_text
+
+        # LLM 未提取到类别时，从原始 query 中尝试提取常见物体
+        if category is None:
+            common_objects = ["狗", "猫", "熊", "大象", "键盘", "椅子", "桌子",
+                            "汽车", "马", "鸟", "鱼", "花", "树", "手机", "电脑",
+                            "杯子", "书", "包", "鞋子", "衣服"]
+            for obj in common_objects:
+                if obj in query:
+                    category = obj
+                    break
                 
     # 3. 提取数量
     count = None
@@ -68,7 +80,20 @@ def parse_output(output_text: str, query: str = "") -> Dict[str, Any]:
                     count = count_text  # 保留模糊描述如"很多"
                     count_type = "vague"
         
-        # 3.2 如果LLM没有输出数量，从原始query中提取
+        # 3.2 从原始query中提取数量（优先于LLM输出，因为LLM经常误判）
+        # 提取query中的具体数字
+        query_num_match = re.search(r'(\d+)\s*[张只幅个份条]', query)
+        if not query_num_match:
+            query_num_match = re.search(r'([一二三四五六七八九十两]+)\s*[张只幅个份条]', query)
+        if query_num_match:
+            num_val = query_num_match.group(1)
+            if num_val.isdigit():
+                count = int(num_val)
+            else:
+                count = CHINESE_NUMBERS.get(num_val, num_val)
+            count_type = "specific"
+
+        # 3.3 如果LLM没有输出数量，从LLM输出中提取
         if count is None:
             # 提取阿拉伯数字
             num_match = re.search(r'(\d+)\s*[张只幅个份条]', text)
@@ -119,15 +144,34 @@ def parse_output(output_text: str, query: str = "") -> Dict[str, Any]:
             
     # 如果LLM没有输出属性，尝试从原始query中提取
     if not attributes and need_retrieval:
-        # 查找描述性词汇
-        attr_patterns = ["棕色的", "黑色的", "白色的", "黄色的", "灰色的", "红色的",
-                       "站立的", "坐着的", "躺着的", "奔跑的", "跳跃的",
-                       "清晰的", "模糊的", "全身的", "局部的",
-                       "室内", "室外", "草地上", "雪地中", "水中",
-                       "大", "小", "中等"]
+        attr_patterns = [
+            # 颜色
+            "棕色的", "黑色的", "白色的", "黄色的", "灰色的", "红色的",
+            "蓝色的", "绿色的",
+            # 姿态
+            "站立的", "坐着的", "躺着的", "奔跑的", "跳跃的", "飞翔的",
+            # 场景
+            "室内", "室外", "草地上", "雪地中", "水中", "天空",
+            # 构图
+            "全身的", "全身", "局部的", "局部", "半身", "特写",
+            # 视角
+            "正面", "侧面", "背面", "俯视", "仰视",
+            # 背景
+            "纯色背景", "白色背景", "自然背景",
+            # 光照
+            "明亮的", "昏暗的", "逆光",
+            # 清晰度（保留）
+            "清晰的", "模糊的",
+        ]
         for pattern in attr_patterns:
             if pattern in query:
                 attributes.append(pattern)
+
+        # 单字符属性：需排除为类别词一部分的情况（如"大"是"大象"的一部分）
+        if category:
+            for word in ["大", "小"]:
+                if word in query and word not in category:
+                    attributes.append(word)
                 
     return {
         "need_retrieval": need_retrieval,

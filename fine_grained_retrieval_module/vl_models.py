@@ -1,202 +1,132 @@
 """
 细粒度检索模块的VL模型组件
-提供Qwen2.5-VL模型的初始化和推理功能
-支持transformers直接加载和Ollama调用两种方式
+使用Ollama调用VL模型进行属性条件验证（VL_Refine）
 """
 
-import os
-import re
-import json
-import time
-from typing import Dict, Optional
-from PIL import Image
+from typing import Dict, List
 
-from .constants import QWEN_VL_MODEL_ID, QWEN_VL_OLLAMA_MODEL, LOCAL_MODEL_CACHE
+from .constants import VL_OLLAMA_MODEL
 
 
 class VLModelManager:
-    """VL模型管理器，支持多种调用方式"""
-    
-    def __init__(self, device: str = None, cache_dir: str = None):
-        self.device = device if device else ("cuda" if hasattr(__import__('torch'), 'cuda') and __import__('torch').cuda.is_available() else "cpu")
-        self.cache_dir = cache_dir
-        
-        # transformers直接加载的模型
+    """VL模型管理器，通过Ollama调用VL模型"""
+
+    def __init__(self, model_name: str = VL_OLLAMA_MODEL):
+        self.model_name = model_name
         self.vl_model = None
-        self.vl_processor = None
-        
-        # Ollama调用方式的模型
-        self.vl_model_ollama = None
-    
-    def init_transformers_model(self, model_name: str = QWEN_VL_MODEL_ID) -> bool:
-        """初始化 transformers 加载的 Qwen2.5-VL 模型"""
-        # 优先使用本地缓存路径
-        model_path = LOCAL_MODEL_CACHE.get('qwen_vl')
-        if self.cache_dir:
-            model_path = os.path.join(self.cache_dir, 'qwen_vl')
-        
-        use_local = model_path is not None and os.path.exists(model_path)
-        model_source = model_path if use_local else model_name
-        
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
-                self.vl_processor = AutoProcessor.from_pretrained(
-                    model_source,
-                    cache_dir=self.cache_dir,
-                    local_files_only=use_local,
-                    resume_download=True,
-                    force_download=False
-                )
-                self.vl_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                    model_source,
-                    cache_dir=self.cache_dir,
-                    local_files_only=use_local,
-                    resume_download=True,
-                    force_download=False
-                ).to(self.device).eval()
-                print(f"[细粒度检索] Qwen2.5-VL 模型加载成功（transformers）{'(本地)' if use_local else '(网络)'}")
-                return True
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    print(f"[细粒度检索] Qwen2.5-VL 模型加载失败 (尝试 {attempt + 1}/{max_retries}): {type(e).__name__}")
-                    print(f"等待 {wait_time} 秒后重试...")
-                    time.sleep(wait_time)
-                else:
-                    print(f"[细粒度检索] Qwen2.5-VL 模型加载失败（transformers），已达到最大重试次数")
-                    print("=" * 60)
-                    print("解决方案：")
-                    print("1. 使用Ollama方式（推荐）：")
-                    print(f"   ollama pull {QWEN_VL_OLLAMA_MODEL}")
-                    print("2. 手动下载模型到本地：")
-                    print(f"   huggingface-cli download {QWEN_VL_MODEL_ID} --local-dir ./models/qwen_vl")
-                    print("3. 在 constants.py 中配置本地路径：")
-                    print(f"   LOCAL_MODEL_CACHE['qwen_vl'] = './models/qwen_vl'")
-                    print("=" * 60)
-                    self.vl_model = None
-                    return False
-    
-    def init_ollama_model(self, model_name: str = QWEN_VL_OLLAMA_MODEL) -> bool:
-        """使用 Ollama 调用 Qwen2.5-VL，包含模型可用性检查"""
+        self._init_ollama()
+
+    def _init_ollama(self) -> bool:
+        """初始化Ollama VL模型"""
         try:
             import subprocess
-            
-            # 检查 Ollama 是否已安装
-            try:
-                result = subprocess.run(["ollama", "list"], capture_output=True, text=True, timeout=10)
-                if result.returncode != 0:
-                    print(f"[细粒度检索] Ollama 服务未运行或未安装，请先启动 Ollama")
-                    self.vl_model_ollama = None
-                    return False
-                installed_models = result.stdout
-            except FileNotFoundError:
-                print(f"[细粒度检索] 未找到 ollama 命令，请先安装 Ollama")
-                self.vl_model_ollama = None
+            result = subprocess.run(["ollama", "list"], capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                print(f"[VL模型] Ollama服务未运行")
                 return False
-            
-            # 检查目标模型是否已安装
-            model_short_name = model_name  # 如 "qwen2.5vl:3b"
-            if model_short_name not in installed_models and model_short_name.split(":")[0] not in installed_models:
-                print(f"[细粒度检索] Ollama 模型 '{model_name}' 未安装！")
-                print("=" * 60)
-                print("请先运行以下命令安装该模型：")
-                print(f"  ollama pull {model_name}")
-                print("=" * 60)
-                self.vl_model_ollama = None
+
+            if self.model_name not in result.stdout and self.model_name.split(":")[0] not in result.stdout:
+                print(f"[VL模型] 模型 '{self.model_name}' 未安装，请运行: ollama pull {self.model_name}")
                 return False
-            
+
             from langchain_ollama import ChatOllama
-            self.vl_model_ollama = ChatOllama(
-                model=model_name,
-                temperature=0.0
-            )
-            print(f"[细粒度检索] Ollama Qwen2.5-VL 初始化成功（模型: {model_name}）")
+            self.vl_model = ChatOllama(model=self.model_name, temperature=0.0)
+            print(f"[VL模型] Ollama 初始化成功（模型: {self.model_name}）")
             return True
         except Exception as e:
-            print(f"[细粒度检索] Ollama Qwen2.5-VL 初始化失败: {str(e)}")
-            self.vl_model_ollama = None
+            print(f"[VL模型] Ollama初始化失败: {str(e)}")
             return False
-    
-    def extract_features(self, image_path: str) -> Dict[str, int]:
+
+
+class VLRefiner:
+    """
+    VL 精排器：使用 VL 模型对粗排候选图像进行属性条件验证。
+    对应 v1.md 架构中的 VL_Refine 组件。
+    """
+
+    def __init__(self, vl_manager: "VLModelManager"):
+        self.vl_manager = vl_manager
+
+    def refine(self, results: List[Dict], category: str,
+               attributes: List[str], top_k: int = None,
+               alpha: float = 0.4, beta: float = 0.6,
+               min_vl_score: float = 0.2) -> List[Dict]:
         """
-        使用 Qwen2.5-VL 提取图片的细粒度特征（类别及数量）
-        优先使用Ollama方式，如果未初始化则尝试transformers方式
+        两阶段检索的精排阶段：VL 二分类验证属性条件（是/否）。
+        VL 通过 → 保留 CLIP 粗排分排序；VL 不通过 → 剔除。
         """
-        # 优先使用Ollama方式
-        if self.vl_model_ollama is not None:
-            return self._extract_ollama(image_path)
-        
-        # 尝试transformers方式
-        if self.vl_model is not None:
-            return self._extract_transformers(image_path)
-        
-        # 无可用模型，返回空结果
-        print(f"[细粒度检索] VL模型未初始化，无法提取特征: {image_path}")
-        return {}
-    
-    def _extract_ollama(self, image_path: str) -> Dict[str, int]:
-        """使用 Ollama Qwen2.5-VL 提取细粒度特征"""
+        if not attributes or not results:
+            return results
+
+        if self.vl_manager.vl_model is None:
+            print("[VL_Refine] VL 模型未初始化，跳过精排，返回原始粗排结果")
+            return results
+
+        max_refine = len(results)
+        candidates = results[:max_refine]
+        print(f"[VL_Refine] 开始精排，对 {max_refine} 张候选图像验证属性: {attributes}")
+
+        attr_text = "、".join(attributes)
+        passed = []
+        for i, r in enumerate(candidates):
+            print(f"  [VL_Refine] 验证候选 {i+1}/{max_refine}...")
+            vl_score = self._score_attributes(r["url"], category, attr_text)
+            r["vl_score"] = vl_score
+            if vl_score >= min_vl_score:
+                r["final_score"] = r.get("score", 0)
+                passed.append(r)
+            else:
+                print(f"    -> 属性不匹配，已剔除")
+
+        # 未进入精排的候选保持原分数
+        for r in results[max_refine:]:
+            r["vl_score"] = r.get("score", 0)
+            r["final_score"] = r.get("score", 0)
+
+        refined = sorted(passed + results[max_refine:],
+                        key=lambda x: x.get("final_score", 0), reverse=True)
+        print(f"[VL_Refine] 精排完成，通过 {len(passed)}/{max_refine} 张，共 {len(refined)} 张")
+        return refined[:top_k] if top_k else refined
+
+    def _score_attributes(self, image_path: str, category: str,
+                          attr_text: str) -> float:
+        """
+        使用 VL 模型对单张图像进行属性匹配评分。
+
+        Returns:
+            0.0 ~ 1.0 之间的属性匹配分数
+        """
+        if self.vl_manager.vl_model is None:
+            return 0.0
+
         try:
             import base64
             from langchain_core.messages import HumanMessage
-            
-            # 读取图像文件并转换为base64
+
             with open(image_path, "rb") as f:
                 image_base64 = base64.b64encode(f.read()).decode("utf-8")
-            
-            # 获取图像格式
+
             ext = image_path.lower().split(".")[-1]
-            if ext in ["jpg", "jpeg"]:
-                mime_type = "image/jpeg"
-            elif ext == "png":
-                mime_type = "image/png"
-            else:
-                mime_type = "image/jpeg"
-            
+            mime_type = "image/jpeg" if ext in ["jpg", "jpeg"] else "image/png"
+
+            prompt = (
+                f"请判断这张图片中的{category}是否符合以下属性条件：{attr_text}。\n"
+                f"只回复「是」或「否」，不要回复任何其他内容。"
+            )
             messages = [
                 HumanMessage(content=[
                     {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_base64}"}},
-                    {"type": "text", "text": "请识别图片中的所有物体及其数量，以JSON格式返回，例如：{\"狗\": 2, \"猫\": 1}"}
+                    {"type": "text", "text": prompt}
                 ])
             ]
-            response = self.vl_model_ollama.invoke(messages)
-            
-            # 解析JSON响应
+            response = self.vl_manager.vl_model.invoke(messages)
             content = response.content if hasattr(response, 'content') else str(response)
-            # 尝试提取JSON
-            json_match = re.search(r'\{[^}]+\}', content)
-            if json_match:
-                return json.loads(json_match.group())
-            return {}
+            content = content.strip()
+            print(f"    [VL raw] {content}")
+
+            if "是" in content and "否" not in content:
+                return 1.0
+            return 0.0
         except Exception as e:
-            print(f"[细粒度检索] Ollama VL推理失败: {str(e)}")
-            return {}
-    
-    def _extract_transformers(self, image_path: str) -> Dict[str, int]:
-        """使用 transformers 加载的 Qwen2.5-VL 提取细粒度特征"""
-        try:
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": image_path},
-                        {"type": "text", "text": "请识别图片中的所有物体及其数量，以JSON格式返回，例如：{\"狗\": 2, \"猫\": 1}"}
-                    ]
-                }
-            ]
-            text = self.vl_processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            inputs = self.vl_processor(text=text, images=Image.open(image_path), return_tensors="pt").to(self.device)
-            
-            import torch
-            with torch.no_grad():
-                outputs = self.vl_model.generate(**inputs, max_new_tokens=100)
-            
-            generated_text = self.vl_processor.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
-            # 简化处理，实际应使用json.loads
-            return {"解析结果": 1}
-        except Exception as e:
-            print(f"[细粒度检索] VL推理失败: {str(e)}")
-            return {}
-    
+            print(f"[VLRefiner] 评分失败 [{image_path}]: {str(e)}")
+            return 0.0

@@ -1,6 +1,6 @@
 """
-细粒度检索模块包
-提供基于Qwen2.5-VL和CLIP的细粒度图像检索功能
+细粒度检索模块
+基于VL模型的离线标注和CLIP编码的两阶段检索
 """
 
 from .module import FineGrainedRetrievalModule
