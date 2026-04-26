@@ -172,6 +172,122 @@ class MultiModalAgentPipeline:
             output = _format_response(self.llm, user_query, res)
             return {"output": output}
 
+    def chat_structured(self, user_query: str, progress_callback=None) -> dict:
+        """
+        与 chat() 相同的路由逻辑，但返回结构化数据供 Web 前端使用。
+
+        Returns:
+            {"output": "<formatted string>", "structured": {...}}
+        """
+        # Step 1: 意图识别
+        self._report_progress(progress_callback, "intent", "正在分析意图...")
+        intent = self.intent_module.analyze_intent(user_query)
+        print(f"[意图] {intent.get('need_retrieval')} | "
+              f"类别={intent.get('category')} | "
+              f"属性={intent.get('attributes')} | "
+              f"方式={intent.get('method')} | "
+              f"数量={intent.get('count')}")
+
+        need_retrieval = intent.get("need_retrieval", False)
+        attributes = intent.get("attributes", [])
+        category = intent.get("category", "")
+        method = intent.get("method", "TopK")
+        count = intent.get("count")
+
+        if not need_retrieval:
+            return {
+                "output": "不需要检索。",
+                "structured": {"route": "no_retrieval", "query": user_query,
+                               "intent": intent, "results": [], "total_results": 0}
+            }
+
+        if not category:
+            print(f"[路由] 常规检索（无类别，用原始查询）")
+            self._report_progress(progress_callback, "retrieval", "正在进行常规检索...")
+            k = self._extract_count(user_query)
+            res = self.regular_retrieval.retrieve(user_query, method="TopK", top_k=k)
+            res = _trim_result_paths(res)
+            self._report_progress(progress_callback, "formatting", "正在生成回复...")
+            output = _format_response(self.llm, user_query, res)
+            return {
+                "output": output,
+                "structured": {
+                    "route": "regular",
+                    "query": user_query,
+                    "intent": intent,
+                    "results": res.get("results", []),
+                    "total_results": len(res.get("results", []))
+                }
+            }
+
+        if attributes:
+            print(f"[路由] 细粒度检索: {category}, 属性={attributes}, {method}")
+            self._report_progress(progress_callback, "retrieval", "正在进行粗排检索...")
+            coarse_k = max((count or 5) * 3, 15) if isinstance(count, int) else 30
+            res = self.fine_grained.online_retrieval(
+                category=category,
+                method=method or "TopK",
+                target_count=count if isinstance(count, int) else None,
+                top_k=coarse_k,
+                attributes=attributes
+            )
+            if "results" in res:
+                total_candidates = len(res.get("results", []))
+                self._report_progress(progress_callback, "vl_refine",
+                                      f"正在进行VL精排验证 ({total_candidates} 张候选)...",
+                                      current=0, total=total_candidates)
+                res["results"] = self.fine_grained.refine_by_attributes(
+                    res.get("results", []), category, attributes,
+                    progress_callback=progress_callback
+                )
+                if method == "TopK" and isinstance(count, int) and count > 0:
+                    if len(res["results"]) > count:
+                        print(f"[路由] 精排后裁剪 {len(res['results'])} → {count} 张")
+                    res["results"] = res["results"][:count]
+                res["refinement_applied"] = True
+                res["refinement_method"] = "VL_Refine"
+            res = _trim_result_paths(res)
+            self._report_progress(progress_callback, "formatting", "正在生成回复...")
+            output = _format_response(self.llm, user_query, res)
+            return {
+                "output": output,
+                "structured": {
+                    "route": "fine_grained",
+                    "query": user_query,
+                    "intent": intent,
+                    "results": res.get("results", []),
+                    "total_results": len(res.get("results", [])),
+                    "refinement_applied": True,
+                    "refinement_method": "VL_Refine"
+                }
+            }
+        else:
+            print(f"[路由] 常规检索: {category}, {method}")
+            self._report_progress(progress_callback, "retrieval", "正在进行常规检索...")
+            k = self._resolve_top_k(method, count)
+            res = self.regular_retrieval.retrieve(
+                query=category, method=method or "TopK", top_k=k
+            )
+            res = _trim_result_paths(res)
+            self._report_progress(progress_callback, "formatting", "正在生成回复...")
+            output = _format_response(self.llm, user_query, res)
+            return {
+                "output": output,
+                "structured": {
+                    "route": "regular",
+                    "query": user_query,
+                    "intent": intent,
+                    "results": res.get("results", []),
+                    "total_results": len(res.get("results", []))
+                }
+            }
+
+    @staticmethod
+    def _report_progress(callback, stage: str, message: str, **kwargs):
+        """向 progress_callback 报告进度（如果已设置）"""
+        if callback:
+            callback({"stage": stage, "message": message, **kwargs})
+
     @staticmethod
     def _extract_count(query: str) -> int:
         """从查询文本中提取数量，默认返回 5"""

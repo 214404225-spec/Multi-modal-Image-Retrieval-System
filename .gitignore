@@ -38,9 +38,6 @@ Thumbs.db
 # Image_vector Cache
 cache/
 
-# Test images
-test_images/
-
 # Results
 run_result_*/
 test_results.txt
