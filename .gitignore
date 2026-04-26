@@ -38,9 +38,6 @@ Thumbs.db
 # Image_vector Cache
 cache/
 
-# Test images
-test_images/
-
 # Results
 run_result_*/
 test_results.txt
@@ -49,6 +46,10 @@ test_results.txt
 # Ollama models (don't commit models)
 ollama/
 models/
+
+# Test images
+test_images/
+
 
 # fixing process files
 fix/

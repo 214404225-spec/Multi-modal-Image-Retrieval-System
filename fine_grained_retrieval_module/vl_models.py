@@ -3,6 +3,7 @@
 使用Ollama调用VL模型进行属性条件验证（VL_Refine）
 """
 
+import os
 from typing import Dict, List
 
 from .constants import VL_OLLAMA_MODEL
@@ -50,7 +51,8 @@ class VLRefiner:
     def refine(self, results: List[Dict], category: str,
                attributes: List[str], top_k: int = None,
                alpha: float = 0.4, beta: float = 0.6,
-               min_vl_score: float = 0.2) -> List[Dict]:
+               min_vl_score: float = 0.2,
+               progress_callback=None) -> List[Dict]:
         """
         两阶段检索的精排阶段：VL 二分类验证属性条件（是/否）。
         VL 通过 → 保留 CLIP 粗排分排序；VL 不通过 → 剔除。
@@ -70,6 +72,13 @@ class VLRefiner:
         passed = []
         for i, r in enumerate(candidates):
             print(f"  [VL_Refine] 验证候选 {i+1}/{max_refine}...")
+            if progress_callback:
+                progress_callback({
+                    "stage": "vl_refine",
+                    "current": i + 1,
+                    "total": max_refine,
+                    "current_image": os.path.basename(r["url"])
+                })
             vl_score = self._score_attributes(r["url"], category, attr_text)
             r["vl_score"] = vl_score
             if vl_score >= min_vl_score:

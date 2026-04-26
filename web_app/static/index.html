@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>多模态图像检索系统</title>
+<style>
+:root {
+  --bg: #f8f9fa;
+  --card-bg: #fff;
+  --text: #212529;
+  --text-secondary: #6c757d;
+  --border: #dee2e6;
+  --primary: #4361ee;
+  --primary-hover: #3a56d4;
+  --badge-bg: rgba(0,0,0,.7);
+  --badge-text: #fff;
+  --overlay: rgba(0,0,0,.85);
+  --input-bg: #fff;
+  --shadow: 0 2px 8px rgba(0,0,0,.1);
+}
+@media (prefers-color-scheme: dark) {
+:root {
+  --bg: #1a1a2e;
+  --card-bg: #16213e;
+  --text: #e4e6eb;
+  --text-secondary: #aaa;
+  --border: #2a2a4a;
+  --primary: #5e7ce2;
+  --primary-hover: #7b93f0;
+  --input-bg: #16213e;
+  --shadow: 0 2px 12px rgba(0,0,0,.4);
+}
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+#app { max-width: 1100px; margin: 0 auto; padding: 24px 16px 60px; }
+
+header {
+  text-align: center;
+  padding: 32px 0 24px;
+}
+header h1 { font-size: 1.6rem; font-weight: 700; letter-spacing: -.02em; }
+header p { color: var(--text-secondary); margin-top: 6px; font-size: .9rem; }
+
+/* Search */
+.search-bar {
+  display: flex; gap: 10px; max-width: 640px; margin: 0 auto 24px;
+}
+.search-bar input {
+  flex: 1; padding: 12px 18px; border: 1px solid var(--border);
+  border-radius: 10px; font-size: 1rem; background: var(--input-bg);
+  color: var(--text); outline: none; transition: border-color .2s;
+}
+.search-bar input:focus { border-color: var(--primary); }
+.search-bar input:disabled { opacity: .5; }
+.search-bar button {
+  padding: 12px 28px; background: var(--primary); color: #fff;
+  border: none; border-radius: 10px; font-size: 1rem; cursor: pointer;
+  font-weight: 600; transition: background .2s; white-space: nowrap;
+}
+.search-bar button:hover { background: var(--primary-hover); }
+.search-bar button:disabled { opacity: .5; cursor: not-allowed; }
+
+/* Loading */
+#loading {
+  display: none; flex-direction: column; align-items: center; gap: 14px;
+  padding: 36px 0; color: var(--text-secondary);
+}
+#loading.visible { display: flex; }
+.spinner {
+  width: 36px; height: 36px; border: 3px solid var(--border);
+  border-top-color: var(--primary); border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+#progress-message { font-size: .95rem; text-align: center; }
+
+#vl-progress {
+  display: none; flex-direction: column; align-items: center; gap: 6px;
+  width: 100%; max-width: 400px;
+}
+#vl-progress.visible { display: flex; }
+.progress-track {
+  width: 100%; height: 6px; background: var(--border); border-radius: 3px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%; width: 0%; background: var(--primary);
+  border-radius: 3px; transition: width .3s;
+}
+#progress-text { font-size: .8rem; }
+
+/* Route info */
+#route-info {
+  display: none; align-items: center; gap: 12px; padding: 10px 16px;
+  margin-bottom: 16px; border-radius: 8px;
+  background: var(--card-bg); border: 1px solid var(--border);
+  font-size: .9rem;
+}
+#route-info.visible { display: flex; flex-wrap: wrap; }
+.route-badge {
+  padding: 2px 10px; border-radius: 12px; font-size: .78rem;
+  font-weight: 600;
+}
+.route-regular { background: #d4edda; color: #155724; }
+.route-fine { background: #fff3cd; color: #856404; }
+.route-none { background: #f8d7da; color: #721c24; }
+
+/* Results grid */
+#results-grid {
+  display: none; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 14px;
+}
+#results-grid.visible { display: grid; }
+
+.result-card {
+  background: var(--card-bg); border-radius: 10px; overflow: hidden;
+  cursor: pointer; transition: transform .15s, box-shadow .15s;
+  box-shadow: var(--shadow); position: relative;
+}
+.result-card:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,.15); }
+.result-card img {
+  width: 100%; aspect-ratio: 1; object-fit: cover; display: block;
+  background: var(--border);
+}
+.result-card .score-badge {
+  position: absolute; top: 8px; right: 8px;
+  background: var(--badge-bg); color: var(--badge-text);
+  padding: 2px 8px; border-radius: 8px; font-size: .75rem;
+  font-weight: 600; font-variant-numeric: tabular-nums;
+}
+.result-card .card-footer {
+  padding: 8px 10px; font-size: .75rem; color: var(--text-secondary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Empty & Error */
+#empty-state, #error-state {
+  display: none; text-align: center; padding: 48px 16px;
+  color: var(--text-secondary);
+}
+#empty-state.visible, #error-state.visible { display: block; }
+#empty-state p, #error-state p { font-size: 1rem; margin-bottom: 12px; }
+#error-state button {
+  padding: 10px 24px; background: var(--primary); color: #fff;
+  border: none; border-radius: 8px; font-size: .9rem; cursor: pointer;
+  font-weight: 600;
+}
+
+/* Lightbox */
+#lightbox {
+  display: none; position: fixed; inset: 0; z-index: 1000;
+  background: var(--overlay); align-items: center; justify-content: center;
+  flex-direction: column; padding: 24px;
+}
+#lightbox.visible { display: flex; }
+#lightbox img {
+  max-width: 90vw; max-height: 75vh; object-fit: contain;
+  border-radius: 8px;
+}
+#lightbox .lb-close {
+  position: absolute; top: 16px; right: 24px;
+  background: none; border: none; color: #fff; font-size: 2rem;
+  cursor: pointer; line-height: 1;
+}
+#lightbox .lb-info {
+  margin-top: 16px; color: #ccc; font-size: .85rem; text-align: center;
+  max-width: 90vw;
+}
+.lb-info span { display: inline-block; margin: 0 12px; }
+.lb-filename { color: #fff; font-weight: 600; display: block; margin-bottom: 6px; }
+
+@media (max-width: 600px) {
+  #results-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+  header h1 { font-size: 1.3rem; }
+  .search-bar { flex-direction: column; }
+  .search-bar button { width: 100%; }
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>多模态图像检索系统</h1>
+    <p>输入中文自然语言查询，定位你想要的图像</p>
+  </header>
+
+  <div class="search-bar">
+    <input id="query-input" type="text"
+           placeholder="输入中文查询，例如「找两只棕色的狗」或「找5张键盘的图片」"
+           autofocus>
+    <button id="search-btn">检索</button>
+  </div>
+
+  <div id="loading">
+    <div class="spinner"></div>
+    <div id="progress-message">正在处理...</div>
+    <div id="vl-progress">
+      <div class="progress-track">
+        <div class="progress-fill" id="progress-fill"></div>
+      </div>
+      <div id="progress-text"></div>
+    </div>
+  </div>
+
+  <div id="route-info">
+    <span id="route-badge" class="route-badge"></span>
+    <span id="route-summary"></span>
+    <span id="result-count"></span>
+  </div>
+
+  <div id="results-grid"></div>
+
+  <div id="empty-state">
+    <p>未找到匹配的图片。</p>
+    <p style="font-size:.85rem">尝试更换查询方式或减少属性条件。</p>
+  </div>
+
+  <div id="error-state">
+    <p id="error-message">检索时出现错误。</p>
+    <button onclick="resetUI()">重试</button>
+  </div>
+</div>
+
+<div id="lightbox" onclick="closeLightbox()">
+  <button class="lb-close" onclick="closeLightbox()">&times;</button>
+  <img id="lightbox-img" src="" alt="">
+  <div class="lb-info">
+    <div class="lb-filename" id="lb-filename"></div>
+    <span id="lb-scores"></span>
+  </div>
+</div>
+
+<script>
+let currentQuery = '';
+
+function $(id) { return document.getElementById(id); }
+
+// State management
+function setState(state) {
+  const loading = $('loading');
+  const vlProgress = $('vl-progress');
+  const routeInfo = $('route-info');
+  const resultsGrid = $('results-grid');
+  const emptyState = $('empty-state');
+  const errorState = $('error-state');
+  const searchBtn = $('search-btn');
+  const queryInput = $('query-input');
+
+  loading.classList.remove('visible');
+  vlProgress.classList.remove('visible');
+  routeInfo.classList.remove('visible');
+  resultsGrid.classList.remove('visible');
+  emptyState.classList.remove('visible');
+  errorState.classList.remove('visible');
+
+  if (state === 'loading') {
+    loading.classList.add('visible');
+    searchBtn.disabled = true;
+    queryInput.disabled = true;
+    $('progress-message').textContent = '正在处理...';
+    $('progress-fill').style.width = '0%';
+    $('progress-text').textContent = '';
+  } else if (state === 'vl_refine') {
+    loading.classList.add('visible');
+    vlProgress.classList.add('visible');
+    searchBtn.disabled = true;
+    queryInput.disabled = true;
+  } else if (state === 'results') {
+    resultsGrid.classList.add('visible');
+    routeInfo.classList.add('visible');
+    searchBtn.disabled = false;
+    queryInput.disabled = false;
+  } else if (state === 'empty') {
+    emptyState.classList.add('visible');
+    routeInfo.classList.add('visible');
+    searchBtn.disabled = false;
+    queryInput.disabled = false;
+  } else if (state === 'error') {
+    errorState.classList.add('visible');
+    searchBtn.disabled = false;
+    queryInput.disabled = false;
+  } else { // idle
+    searchBtn.disabled = false;
+    queryInput.disabled = false;
+  }
+}
+
+function resetUI() { setState('idle'); }
+
+// SSE query submission
+async function submitQuery(query) {
+  query = query.trim();
+  if (!query) return;
+  currentQuery = query;
+
+  setState('loading');
+
+  try {
+    const resp = await fetch('/api/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query })
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      $('error-message').textContent = err.error || `请求失败 (${resp.status})`;
+      setState('error');
+      return;
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = JSON.parse(line.slice(6));
+          handleEvent(data);
+        }
+      }
+    }
+  } catch (err) {
+    console.error(err);
+    $('error-message').textContent = '网络错误或服务未启动。请检查服务器是否运行。';
+    setState('error');
+  }
+}
+
+function handleEvent(data) {
+  switch (data.type) {
+    case 'progress':
+      handleProgress(data);
+      break;
+    case 'complete':
+      handleComplete(data);
+      break;
+    case 'error':
+      $('error-message').textContent = data.message || '未知错误';
+      setState('error');
+      break;
+  }
+}
+
+function handleProgress(data) {
+  if (data.stage === 'vl_refine') {
+    setState('vl_refine');
+    $('progress-message').textContent = data.message || '正在进行VL精排验证...';
+    if (data.current_image) {
+      $('progress-message').textContent = `VL精排验证: ${data.current_image}`;
+    }
+    const pct = data.total > 0 ? Math.round(data.current / data.total * 100) : 0;
+    $('progress-fill').style.width = pct + '%';
+    $('progress-text').textContent = `${data.current || 0} / ${data.total || 0}`;
+  } else if (data.stage === 'intent') {
+    $('progress-message').textContent = '正在分析意图...';
+  } else if (data.stage === 'retrieval') {
+    $('progress-message').textContent = '正在进行CLIP检索...';
+  } else if (data.stage === 'formatting') {
+    $('progress-message').textContent = '正在生成回复...';
+  }
+}
+
+function handleComplete(data) {
+  const s = data.structured || {};
+  renderRouteInfo(s);
+  renderResults(s.results || []);
+}
+
+function renderRouteInfo(s) {
+  const badge = $('route-badge');
+  badge.textContent = '';
+  badge.className = 'route-badge';
+
+  const routeLabels = {
+    'fine_grained': '细粒度两阶段检索',
+    'regular': '常规检索',
+    'no_retrieval': '无需检索'
+  };
+  const routeClasses = {
+    'fine_grained': 'route-fine',
+    'regular': 'route-regular',
+    'no_retrieval': 'route-none'
+  };
+
+  badge.textContent = routeLabels[s.route] || s.route;
+  badge.className = 'route-badge ' + (routeClasses[s.route] || '');
+
+  const intent = s.intent || {};
+  const parts = [];
+  if (intent.category) parts.push(`类别: ${intent.category}`);
+  if (intent.attributes && intent.attributes.length > 0) parts.push(`属性: ${intent.attributes.join('、')}`);
+  if (intent.method) parts.push(`方法: ${intent.method}`);
+  $('route-summary').textContent = parts.join('  ·  ');
+
+  $('result-count').textContent = `共 ${s.total_results || 0} 张`;
+}
+
+function renderResults(results) {
+  const grid = $('results-grid');
+  if (!results || results.length === 0) {
+    grid.innerHTML = '';
+    setState('empty');
+    return;
+  }
+
+  grid.innerHTML = results.map(r => {
+    const filename = r.url || '';
+    const score = r.final_score || r.score || 0;
+    return `
+      <div class="result-card" onclick="openLightbox('${esc(filename)}', ${r.score || 0}, ${r.vl_score ?? 'null'}, ${score})"
+           title="${esc(filename)}&#10;CLIP粗排: ${(r.score||0).toFixed(4)}&#10;VL精排: ${r.vl_score != null ? r.vl_score.toFixed(4) : 'N/A'}&#10;最终: ${score.toFixed(4)}">
+        <img src="/images/${esc(filename)}" loading="lazy"
+             onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22200%22 height=%22200%22><rect fill=%22%23ddd%22 width=%22200%22 height=%22200%22/><text x=%22100%22 y=%22100%22 text-anchor=%22middle%22 dy=%22.3em%22 fill=%22%23999%22 font-size=%2212%22>加载失败</text></svg>'">
+        <span class="score-badge">${score.toFixed(3)}</span>
+        <div class="card-footer">${esc(filename)}</div>
+      </div>`;
+  }).join('');
+
+  setState('results');
+}
+
+// Lightbox
+function openLightbox(filename, score, vlScore, finalScore) {
+  $('lightbox-img').src = '/images/' + filename;
+  $('lb-filename').textContent = filename;
+
+  let scoreParts = [];
+  scoreParts.push(`CLIP粗排: ${score.toFixed(4)}`);
+  if (vlScore != null) scoreParts.push(`VL精排: ${vlScore.toFixed(4)}`);
+  scoreParts.push(`最终: ${finalScore.toFixed(4)}`);
+  $('lb-scores').textContent = scoreParts.join('  ·  ');
+
+  $('lightbox').classList.add('visible');
+}
+
+function closeLightbox() {
+  $('lightbox').classList.remove('visible');
+  $('lightbox-img').src = '';
+}
+
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// Event listeners
+$('search-btn').addEventListener('click', () => submitQuery($('query-input').value));
+$('query-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') submitQuery($('query-input').value);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeLightbox();
+});
+</script>
+</body>
+</html>

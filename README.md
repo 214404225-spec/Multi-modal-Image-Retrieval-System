@@ -10,11 +10,19 @@
 - **VL 精排**：VL 模型对候选图像逐一验证属性（是/否），通过则保留 CLIP 粗排分排序，不通过则剔除。模型通过 `VL_MODEL` 环境变量配置（默认 `qwen3-vl:8b`）
 - **程序化路由**：路由决策由代码确定性执行（`if attributes:`），不依赖 LLM 自行选择，消除小模型路由不可靠的问题
 - **共享离线管线**：常规检索与细粒度检索共用 CLIP 图像编码器构建的离线向量库
+- **Web 前端**：FastAPI + SSE 流式推送，直观展示检索图像缩略图，支持灯箱查看大图和分数详情。浏览器打开即可使用，无需额外配置
 - **本地优先**：默认全本地运行，模型可升级（见下方「架构演进」）
 
 ## 系统总体架构
 
 ```
+浏览器 / CLI
+    ↓
+┌─ Web 前端 (FastAPI + SSE) ─┐  或  CLI (agent_pipeline.main)
+│  web_app/app.py             │
+│  static/index.html          │
+└─────────────────────────────┘
+    ↓
 用户输入 Query
     ↓
 LLM 意图识别 (Ollama — INTENT_MODEL 可配置)
@@ -85,6 +93,20 @@ HasAttr?（代码决策，非 LLM 路由）
 5. 未提取到类别 → 回退：用原始查询做常规检索
 
 LLM 不参与路由决策，只负责意图识别、VL 精排和回复格式化三个核心环节。
+
+### 6. Web 前端模块 (`web_app/`)
+
+基于 FastAPI 的 Web 服务，提供浏览器端的图像检索界面：
+
+- **`app.py`**：FastAPI 应用，启动时创建 `MultiModalAgentPipeline` 单例。核心端点：
+  - `POST /api/chat/stream`：SSE 流式检索，推送进度事件（`intent` → `retrieval` → `vl_refine` → `formatting`）→ 最终返回结构化 JSON（含图片路径、各阶段分数、路由信息）
+  - `GET /api/health`：服务健康检查（pipeline 状态、模型信息、图像总数）
+  - `/images/{filename}`：从 `test_images/` 静态提供图像文件
+  - `/`：单文件前端页面
+- **`static/index.html`**：单文件前端，零外部依赖。深色/浅色主题自动切换，响应式布局。搜索框 → 进度条（VL 精排阶段实时显示当前候选图像名）→ 缩略图结果网格（含分数角标）→ 灯箱大图查看详情
+- **SSE 流式设计**：`asyncio.Queue` 桥接同步 pipeline（后台线程）与异步 SSE 流，VL 精排的逐候选进度实时推送到前端
+
+Pipeline 新增 `chat_structured()` 方法（`chat()` 保持不变），支持 `progress_callback` 回调参数，将检索各阶段进度和结构化结果传递到 Web 层。
 
 ## 架构演进：本地模型 → SOTA 多模态 API
 
@@ -237,7 +259,23 @@ python scripts/download_models.py --verify-only
 
 ## 使用方法
 
-### 交互式对话
+### Web 前端（推荐）
+
+```bash
+# 启动 Web 服务
+python -m uvicorn web_app.app:app --host 0.0.0.0 --port 8000
+```
+
+浏览器打开 `http://localhost:8000`，输入中文自然语言查询即可：
+- 搜索框输入查询，回车或点击「检索」按钮
+- 检索进度实时显示（意图分析 → CLIP 粗排 → VL 精排进度条）
+- 结果以缩略图网格展示，每张卡片标注相似度分数
+- 点击任意图片打开灯箱，查看大图和详细分数（CLIP 粗排分、VL 精排分、最终分）
+- 支持深色/浅色主题自动切换，响应式布局适配移动端
+
+**SSE 流式设计**：服务端通过 Server-Sent Events 推送检索进度（`POST /api/chat/stream`），VL 精排阶段逐候选图像报告进度，前端实时渲染进度条和当前验证的图像名。
+
+### 交互式命令行
 
 ```bash
 python -m agent_pipeline.main

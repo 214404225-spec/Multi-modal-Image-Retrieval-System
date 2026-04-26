@@ -5,8 +5,12 @@
 ## 常用命令
 
 ```bash
-# 交互式命令行（主入口）
+# 交互式命令行
 python -m agent_pipeline.main
+
+# Web 前端（推荐）
+python -m uvicorn web_app.app:app --host 0.0.0.0 --port 8000
+# 浏览器打开 http://localhost:8000，直接查看检索图像
 
 # 运行批量测试（25 个预定义查询）
 python -m test_queries.main
@@ -23,7 +27,7 @@ ollama pull qwen2.5:3b        # 意图识别（旧）
 ollama pull qwen2.5vl:3b      # VL_Refine（旧）
 ```
 
-项目依赖通过 conda 环境 `MmIRS` 管理。运行任何 Python 命令前需激活该环境或使用其完整路径：
+项目依赖通过 conda 环境 `MmIRS` 管理（含 `fastapi`、`uvicorn` 等 Web 依赖）。运行任何 Python 命令前需激活该环境或使用其完整路径：
 
 ```bash
 conda activate MmIRS && python -m agent_pipeline.main
@@ -43,6 +47,17 @@ C:\Users\21440\.conda\envs\MmIRS\python.exe -m agent_pipeline.main
 ```
 
 路由是**代码决策**（`pipeline.py` 中 `if attributes:`），不由 LLM 自行选择。LLM 负责 3 个核心环节：意图识别、VL 属性精排、回复格式化。
+
+### Web 前端：`web_app/`
+
+`web_app/app.py` 为 FastAPI 应用，在启动时（lifespan）创建 `MultiModalAgentPipeline` 单例。核心端点：
+
+- `POST /api/chat/stream` — SSE 流式检索：推送进度事件（intent → retrieval → vl_refine → formatting）→ 最终返回结构化 JSON（含图片路径、各阶段分数、路由信息）
+- `GET /api/health` — 服务健康检查
+- `/images/` — 从 `test_images/` 静态提供图片文件
+- `/` — 单文件前端（`static/index.html`），零外部依赖
+
+前端通过 SSE 接收进度（VL 精排阶段实时显示当前候选图像名和进度条），结果以缩略图网格展示，点击打开灯箱查看大图和分数详情。Pipeline 新增 `chat_structured()` 方法（`chat()` 保持不变），支持 `progress_callback` 回调，将 VL 精排的逐候选进度实时推送到前端。
 
 ### 编排器：`agent_pipeline/pipeline.py`
 
@@ -97,6 +112,8 @@ C:\Users\21440\.conda\envs\MmIRS\python.exe -m agent_pipeline.main
 |------|------|---------|
 | **意图识别 LLM** | `INTENT_MODEL` | `qwen3:8b` |
 | **VL 模型** | `VL_MODEL` | `qwen3-vl:8b` |
+| **Web 服务端口** | `uvicorn --port` 参数 | `8000` |
+| **Web 服务主机** | `uvicorn --host` 参数 | `0.0.0.0` |
 | CLIP 模型路径 | `*/constants.py`（基于 PROJECT_ROOT 计算） | `models/clip_ViT` |
 | 索引规模 | `REGULAR_INDEX_SIZE` | `-1`（全部图像） |
 | HuggingFace 镜像 | `pipeline.py:8` / `HF_ENDPOINT` | `https://huggingface.co` |
@@ -130,4 +147,6 @@ Qwen3 对中文的理解、指令遵循和视觉推理能力均显著优于 Qwen
 - **Taiyi-CLIP 双模型编码**：文本编码使用 Chinese RoBERTa（`models/Chinese_RoBERTa/`），原生支持中文；图像编码使用 CLIP ViT-L/14（`models/clip_ViT/`）。两者经投影对齐到同一 embedding 空间。
 - **意图解析多层回退**：LLM 输出优先 → LLM 漏掉属性 → 类别从常见属性列表回退提取 → 属性从 query 中精确匹配提取。
 - **Ollama**：LLM 和 VL 模型依赖 Ollama 本地推理。VL 逐候选图像做二分类验证，粗排阶段控制候选数量避免过载。
+- **SSE 流式进度**：Web 前端通过 Server-Sent Events 接收检索进度，VL 精排阶段实时推送当前验证的图像名和进度（`web_app/app.py` 中用 `asyncio.Queue` 桥接同步 pipeline 与异步 SSE）。
+- **chat_structured() 与 chat() 并存**：`chat_structured()` 返回结构化 JSON + 支持 progress_callback；`chat()` 保持原有行为不变。CLI 和 Web 两个入口互不影响。
 - **图像数据**：期望图像位于 `test_images/` 目录下。`data_load.py` 提供图像发现、计数和采样工具。
