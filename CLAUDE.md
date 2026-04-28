@@ -129,22 +129,6 @@ conda activate MmIRS && python -m experiment.intent_experiment.run_intent_experi
 | 磁盘缓存 | `regular_retrieval_module/offline_indexer.py` | `cache/image_features.pt` |
 | Top-K 默认值 | `pipeline.py:_resolve_top_k()` | 5 |
 
-### 模型升级（可选）
-
-如果显存充足（≥20 GB），可进一步升级：
-
-```bash
-# 设置环境变量切换模型
-export INTENT_MODEL=qwen3:14b
-export VL_MODEL=qwen3-vl:8b
-
-# 或在 PowerShell 中
-$env:INTENT_MODEL="qwen3:14b"
-$env:VL_MODEL="qwen3-vl:8b"
-```
-
-Qwen3 对中文的理解、指令遵循和视觉推理能力均显著优于 Qwen2.5-3B。
-
 ## 关键设计模式
 
 - **程序化路由**：路由决策由代码（`if attributes:`）而非 LLM 做出，消除小模型路由不可靠的问题。
