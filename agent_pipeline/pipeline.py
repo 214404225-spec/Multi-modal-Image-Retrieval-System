@@ -64,13 +64,14 @@ class MultiModalAgentPipeline:
     - 意图识别 → 不需要检索 → 直接回复
     """
 
-    def __init__(self, model_name: str = None):
+    def __init__(self, model_name: str = None, image_dir: str = None):
         # 意图识别/回复格式化所用的 LLM（由 INTENT_MODEL 环境变量或常量默认值控制）
         if model_name is None:
             model_name = INTENT_MODEL_NAME
         print(f"[INFO] 意图 LLM: {model_name}")
 
         self.llm = ChatOllama(model=model_name, temperature=0.0)
+        self.image_dir = image_dir  # 记录当前使用的图像目录
 
         # --- 1. 初始化各模块 ---
         self.intent_module = IntentRecognitionModule(llm=self.llm)
@@ -84,7 +85,7 @@ class MultiModalAgentPipeline:
         )
 
         # --- 2. 加载图像并建索引 ---
-        all_image_paths = discover_image_paths()
+        all_image_paths = discover_image_paths(image_dir) if image_dir else discover_image_paths()
         total_count = get_image_counts(all_image_paths)
         print(f"[INFO] 图像数据集共 {total_count} 张")
 

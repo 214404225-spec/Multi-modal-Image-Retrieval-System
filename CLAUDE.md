@@ -35,7 +35,12 @@ conda activate MmIRS && python -m agent_pipeline.main
 C:\Users\21440\.conda\envs\MmIRS\python.exe -m agent_pipeline.main
 ```
 
+# 运行意图识别实验（独立，不影响主程序）
+conda activate MmIRS && python -m experiment.intent_experiment.run_intent_experiment
+
 项目未配置代码检查或单元测试框架。`test_queries/` 是手动集成测试运行器。
+
+**实验隔离原则：** `experiment/` 目录下的脚本和数据仅做评估用途，只读取 `intent_module/` 等核心模块进行推理，不修改任何主程序代码。新增实验时遵循同样原则。
 
 ## 架构
 

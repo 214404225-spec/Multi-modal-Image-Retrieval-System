@@ -54,7 +54,11 @@ test_images/
 # fixing process files
 fix/
 
+# Experiments
+experiment/
+
 # Others
 hellcondabinconda-hook.ps1) ; (conda activate MmIRS)
 v1_fix.md
-多模态简历.md
+docs/多模态简历.md
+summary/

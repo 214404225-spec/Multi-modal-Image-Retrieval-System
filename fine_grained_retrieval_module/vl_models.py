@@ -4,9 +4,15 @@
 """
 
 import os
+import concurrent.futures
 from typing import Dict, List
 
 from .constants import VL_OLLAMA_MODEL
+
+# VL 调用超时（秒），单张图像推理通常在 5-15s，设置 60s 兜底
+VL_CALL_TIMEOUT = 60
+VL_HTTP_TIMEOUT = 50  # HTTP 层超时，必须 < VL_CALL_TIMEOUT 以确保线程不会因 HTTP 请求未完成而被遗弃
+VL_MAX_RETRIES = 1  # 超时后重试次数
 
 
 class VLModelManager:
@@ -31,12 +37,20 @@ class VLModelManager:
                 return False
 
             from langchain_ollama import ChatOllama
-            self.vl_model = ChatOllama(model=self.model_name, temperature=0.0)
+            self.vl_model = ChatOllama(
+                model=self.model_name, temperature=0.0,
+                timeout=VL_HTTP_TIMEOUT,  # 必须 < VL_CALL_TIMEOUT，确保 HTTP 先超时释放线程
+            )
             print(f"[VL模型] Ollama 初始化成功（模型: {self.model_name}）")
             return True
         except Exception as e:
             print(f"[VL模型] Ollama初始化失败: {str(e)}")
             return False
+
+    def reset_model(self):
+        """重置 VL 模型实例，强制关闭旧 HTTP 连接。超时后调用以避免后续请求排队。"""
+        self.vl_model = None
+        self._init_ollama()
 
 
 class VLRefiner:
@@ -50,8 +64,6 @@ class VLRefiner:
 
     def refine(self, results: List[Dict], category: str,
                attributes: List[str], top_k: int = None,
-               alpha: float = 0.4, beta: float = 0.6,
-               min_vl_score: float = 0.2,
                progress_callback=None) -> List[Dict]:
         """
         两阶段检索的精排阶段：VL 二分类验证属性条件（是/否）。
@@ -81,7 +93,7 @@ class VLRefiner:
                 })
             vl_score = self._score_attributes(r["url"], category, attr_text)
             r["vl_score"] = vl_score
-            if vl_score >= min_vl_score:
+            if vl_score > 0:
                 r["final_score"] = r.get("score", 0)
                 passed.append(r)
             else:
@@ -100,7 +112,7 @@ class VLRefiner:
     def _score_attributes(self, image_path: str, category: str,
                           attr_text: str) -> float:
         """
-        使用 VL 模型对单张图像进行属性匹配评分。
+        使用 VL 模型对单张图像进行属性匹配评分（带超时和重试）。
 
         Returns:
             0.0 ~ 1.0 之间的属性匹配分数
@@ -108,10 +120,10 @@ class VLRefiner:
         if self.vl_manager.vl_model is None:
             return 0.0
 
-        try:
-            import base64
-            from langchain_core.messages import HumanMessage
+        import base64
+        from langchain_core.messages import HumanMessage
 
+        try:
             with open(image_path, "rb") as f:
                 image_base64 = base64.b64encode(f.read()).decode("utf-8")
 
@@ -128,8 +140,11 @@ class VLRefiner:
                     {"type": "text", "text": prompt}
                 ])
             ]
-            response = self.vl_manager.vl_model.invoke(messages)
-            content = response.content if hasattr(response, 'content') else str(response)
+
+            content = self._invoke_vl_with_retry(messages, image_path)
+            if content is None:
+                return 0.0
+
             content = content.strip()
             print(f"    [VL raw] {content}")
 
@@ -137,5 +152,35 @@ class VLRefiner:
                 return 1.0
             return 0.0
         except Exception as e:
-            print(f"[VLRefiner] 评分失败 [{image_path}]: {str(e)}")
+            print(f"[VLRefiner] 评分失败 [{os.path.basename(image_path)}]: {str(e)}")
             return 0.0
+
+    def _invoke_vl_with_retry(self, messages, image_path: str):
+        """带超时和重试的 VL 模型调用。成功返回 content，失败返回 None。
+
+        超时后重置模型实例以强制关闭底层 HTTP 连接，避免后续请求
+        因 Ollama 仍在处理已放弃的旧请求而排队卡死。
+        """
+        last_error = None
+        for attempt in range(VL_MAX_RETRIES + 1):
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            try:
+                future = executor.submit(self.vl_manager.vl_model.invoke, messages)
+                response = future.result(timeout=VL_CALL_TIMEOUT)
+                executor.shutdown(wait=False)
+                return response.content if hasattr(response, 'content') else str(response)
+            except concurrent.futures.TimeoutError:
+                last_error = f"超时 ({VL_CALL_TIMEOUT}s)"
+                executor.shutdown(wait=False)
+                self.vl_manager.reset_model()  # 强制关闭旧连接，避免后续请求排队
+                if attempt < VL_MAX_RETRIES:
+                    print(f"    [VL超时] 重试 {attempt + 1}/{VL_MAX_RETRIES}...")
+            except Exception as e:
+                last_error = str(e)
+                executor.shutdown(wait=False)
+                if attempt < VL_MAX_RETRIES:
+                    print(f"    [VL异常] 重试 {attempt + 1}/{VL_MAX_RETRIES}: {e}")
+
+        fname = os.path.basename(image_path)
+        print(f"    [VL放弃] {fname}: {last_error}")
+        return None

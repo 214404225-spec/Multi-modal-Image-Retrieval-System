@@ -50,6 +50,36 @@ header {
 header h1 { font-size: 1.6rem; font-weight: 700; letter-spacing: -.02em; }
 header p { color: var(--text-secondary); margin-top: 6px; font-size: .9rem; }
 
+/* Directory selector */
+#dir-selector {
+  display: flex; align-items: center; gap: 8px;
+  max-width: 700px; margin: 0 auto 16px; padding: 10px 16px;
+  background: var(--card-bg); border: 1px solid var(--border);
+  border-radius: 10px; font-size: .85rem; flex-wrap: wrap;
+}
+#dir-selector label {
+  color: var(--text-secondary); white-space: nowrap; font-weight: 600;
+}
+#dir-selector select, #dir-selector input {
+  padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;
+  font-size: .82rem; background: var(--input-bg); color: var(--text);
+}
+#dir-selector select { min-width: 140px; }
+#dir-selector input { flex: 1; min-width: 160px; }
+#dir-apply-btn {
+  padding: 6px 16px; background: var(--primary); color: #fff;
+  border: none; border-radius: 6px; font-size: .82rem; cursor: pointer;
+  font-weight: 600; white-space: nowrap;
+}
+#dir-apply-btn:hover { background: var(--primary-hover); }
+#dir-apply-btn:disabled { opacity: .5; cursor: not-allowed; }
+#dir-status {
+  font-size: .78rem; color: var(--text-secondary); white-space: nowrap;
+}
+#dir-status.success { color: #28a745; }
+#dir-status.error { color: #dc3545; }
+#dir-status.loading { color: var(--primary); }
+
 /* Search */
 .search-bar {
   display: flex; gap: 10px; max-width: 640px; margin: 0 auto 24px;
@@ -184,6 +214,8 @@ header p { color: var(--text-secondary); margin-top: 6px; font-size: .9rem; }
   header h1 { font-size: 1.3rem; }
   .search-bar { flex-direction: column; }
   .search-bar button { width: 100%; }
+  #dir-selector { flex-direction: column; align-items: stretch; }
+  #dir-selector select, #dir-apply-btn { width: 100%; }
 }
 </style>
 </head>
@@ -193,6 +225,14 @@ header p { color: var(--text-secondary); margin-top: 6px; font-size: .9rem; }
     <h1>多模态图像检索系统</h1>
     <p>输入中文自然语言查询，定位你想要的图像</p>
   </header>
+
+  <div id="dir-selector">
+    <label for="dir-dropdown">图像库：</label>
+    <select id="dir-dropdown"><option value="">加载中...</option></select>
+    <input id="dir-custom" type="text" placeholder="或输入自定义路径...">
+    <button id="dir-apply-btn">切换</button>
+    <span id="dir-status"></span>
+  </div>
 
   <div class="search-bar">
     <input id="query-input" type="text"
@@ -244,6 +284,63 @@ header p { color: var(--text-secondary); margin-top: 6px; font-size: .9rem; }
 let currentQuery = '';
 
 function $(id) { return document.getElementById(id); }
+
+// ── 图像目录切换 ──
+
+async function loadImageDirs() {
+  try {
+    const resp = await fetch('/api/image-dirs');
+    const data = await resp.json();
+    const select = $('dir-dropdown');
+    select.innerHTML = '';
+    for (const d of data.directories) {
+      const opt = document.createElement('option');
+      opt.value = d.path;
+      opt.textContent = `${d.label} (${d.image_count} 张)`;
+      if (d.path === data.current) opt.selected = true;
+      select.appendChild(opt);
+    }
+    const status = $('dir-status');
+    status.textContent = `当前: ${data.current.split('/').pop() || data.current.split('\\').pop()}`;
+    status.className = 'success';
+  } catch (err) {
+    console.error('加载图像目录失败:', err);
+    $('dir-dropdown').innerHTML = '<option value="">加载失败</option>';
+  }
+}
+
+async function applyImageDir() {
+  let path = $('dir-custom').value.trim() || $('dir-dropdown').value;
+  if (!path) return;
+
+  const btn = $('dir-apply-btn');
+  const status = $('dir-status');
+  btn.disabled = true;
+  status.textContent = '切换中...';
+  status.className = 'loading';
+
+  try {
+    const resp = await fetch('/api/set-image-dir', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path })
+    });
+    const data = await resp.json();
+    if (resp.ok) {
+      status.textContent = `已切换 (${data.image_count} 张)`;
+      status.className = 'success';
+      loadImageDirs();  // 刷新下拉列表
+    } else {
+      status.textContent = data.error || '切换失败';
+      status.className = 'error';
+    }
+  } catch (err) {
+    status.textContent = '网络错误';
+    status.className = 'error';
+  } finally {
+    btn.disabled = false;
+  }
+}
 
 // State management
 function setState(state) {
@@ -464,9 +561,16 @@ $('search-btn').addEventListener('click', () => submitQuery($('query-input').val
 $('query-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') submitQuery($('query-input').value);
 });
+$('dir-apply-btn').addEventListener('click', applyImageDir);
+$('dir-dropdown').addEventListener('change', () => {
+  $('dir-custom').value = '';  // 选择下拉项时清空自定义输入
+});
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeLightbox();
 });
+
+// 页面加载时初始化
+loadImageDirs();
 </script>
 </body>
 </html>

@@ -50,12 +50,9 @@ class FineGrainedRetrievalModule:
 
     def refine_by_attributes(self, results: List[Dict], category: str,
                               attributes: List[str], top_k: int = None,
-                              alpha: float = 0.4, beta: float = 0.6,
-                              min_vl_score: float = 0.2,
                               progress_callback=None) -> List[Dict]:
         """
         两阶段检索的精排阶段（VL_Refine）：
-        使用 VL 模型验证属性条件，加权融合分数。
-        vl_score 低于 min_vl_score 的候选将被硬过滤。
+        VL 模型对属性条件做二分类验证（是/否），通过则保留，不通过则剔除。
         """
-        return self.vl_refiner.refine(results, category, attributes, top_k, alpha, beta, min_vl_score, progress_callback=progress_callback)
+        return self.vl_refiner.refine(results, category, attributes, top_k, progress_callback=progress_callback)
