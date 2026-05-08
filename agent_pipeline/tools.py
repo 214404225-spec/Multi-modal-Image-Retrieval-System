@@ -47,7 +47,17 @@ def create_tools(intent_module, regular_retrieval, fine_grained):
             m = re.search(r'(\d+)\s*[张只幅个份条]', query)
             if m:
                 k = int(m.group(1))
-            res = regular_retrieval.retrieve(query, method="TopK", top_k=k)
+            else:
+                cn_map = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+                          "六": 6, "七": 7, "八": 8, "九": 9, "十": 10, "两": 2}
+                m = re.search(r'([一二三四五六七八九十两]+)\s*[张只幅个份条]', query)
+                if m:
+                    k = cn_map.get(m.group(1), 5)
+                elif any(w in query for w in ["很多", "许多", "大量", "全部", "所有"]):
+                    k = 20
+                elif any(w in query for w in ["一些", "几张", "几只", "几头", "若干"]):
+                    k = 10
+            res = regular_retrieval.retrieve(query, top_k=k)
             return str(_trim_result_paths(res))
         except Exception as e:
             return f"常规检索错误: {str(e)}"
@@ -81,14 +91,12 @@ def create_tools(intent_module, regular_retrieval, fine_grained):
                 import re
                 k = count if isinstance(count, int) else 5
                 query = f"{count}个{cat}" if count else cat
-                res = regular_retrieval.retrieve(query, method="TopK", top_k=k)
+                res = regular_retrieval.retrieve(query, top_k=k)
                 return str(_trim_result_paths(res))
 
-            k = count if isinstance(count, int) and method == "TopK" else 5
+            k = count if isinstance(count, int) else 5
             res = fine_grained.online_retrieval(
                 category=cat,
-                method=method,
-                target_count=count,
                 top_k=k,
                 attributes=attributes
             )
@@ -118,7 +126,7 @@ def create_tools(intent_module, regular_retrieval, fine_grained):
         StructuredTool(
             name="IntentRecognition",
             func=_run_intent,
-            description="意图识别工具。在任何多模态检索操作前，必须先调用此工具来解析用户的原本问题，它将返回是否需要检索、检索的特定类别、检索数量、检索方式（TopK/卡阈值）以及属性条件（如颜色、姿态、场景等）。",
+            description="意图识别工具。在任何多模态检索操作前，必须先调用此工具来解析用户的原本问题，它将返回是否需要检索、检索的特定类别、检索数量以及属性条件（简单属性如颜色/大小/明暗，复杂属性如姿态/场景/视角等）。",
             args_schema=IntentRecognitionInput
         ),
         Tool(
@@ -129,7 +137,7 @@ def create_tools(intent_module, regular_retrieval, fine_grained):
         Tool(
             name="FineGrainedRetrieval",
             func=run_fine_grained_retrieval,
-            description="细粒度两阶段图像检索工具。当用户查询包含属性条件（如颜色、姿态、场景等）时使用。采用粗排（CLIP）+ 精排（VL视觉语言模型验证属性）的双阶段架构。输入参数格式：'类别,检索方式,数量,属性1|属性2'。示例：'狗,TopK,2,棕色|站立' 或 '熊,卡阈值,很多,褐色'。"
+            description="细粒度两阶段图像检索工具。当用户查询包含复杂属性条件（姿态、场景、视角等）或物体数量时使用。采用粗排（CLIP）+ 精排（VL视觉语言模型验证属性）的双阶段架构。输入参数格式：'类别,数量,属性1|属性2'。示例：'狗,2,棕色|站立'。"
         )
     ]
 

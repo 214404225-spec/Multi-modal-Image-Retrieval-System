@@ -1,6 +1,6 @@
 """
 Agent Pipeline包
-提供LangGraph ReAct Agent编排的主流程
+提供 LangChain 的主流程
 """
 
 from .pipeline import MultiModalAgentPipeline

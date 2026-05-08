@@ -33,7 +33,6 @@ class RegularRetrievalModule:
         """离线阶段：预建图像特征向量库。返回总用时（秒）。"""
         return self.offline_indexer.index(image_urls)
 
-    def retrieve(self, query: str, method: str = "TopK",
-                 top_k: int = 5, threshold: float = 0.5) -> Dict[str, Any]:
+    def retrieve(self, query: str, top_k: int = 5) -> Dict[str, Any]:
         """基于文本查询检索图像库，直接返回 Top-K 结果"""
-        return self.retriever.retrieve(query, method, top_k, threshold)
+        return self.retriever.retrieve(query, top_k)

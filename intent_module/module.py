@@ -22,7 +22,8 @@ class IntentRecognitionModule:
             model_name = INTENT_MODEL_NAME
         self.llm = llm if llm is not None else ChatOllama(
             model=model_name,
-            temperature=0.0
+            temperature=0.0,
+            timeout=120
         )
 
         # 构建 Chain

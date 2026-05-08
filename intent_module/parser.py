@@ -115,24 +115,23 @@ def parse_output(output_text: str, query: str = "") -> Dict[str, Any]:
                             count = word
                             count_type = "vague"
                             break
-    
-    # 4. 提取检索方式
-    method = None
+
+    # 6. 提取物体数量（图片里有几个物体，区别于结果数量"几张"）
+    object_count = None
     if need_retrieval:
-        if "top" in text_lower:
-            method = "TopK"
-        elif "阈值" in text or "门槛" in text:
-            method = "卡阈值"
-        
-        if method is None:
-            # 根据数量类型自动推断
-            if count_type == "specific":
-                method = "TopK"
-            elif count_type == "vague":
-                method = "卡阈值"
-            else:
-                # 无数量词时，默认为常规检索
-                method = None
+        object_cls = r'[只个条头匹群双对]'
+        pairs = re.findall(r'(\d+)\s*(' + object_cls + r')', query)
+        if pairs:
+            object_count = int(pairs[-1][0])
+        else:
+            cn_pairs = re.findall(r'([一二三四五六七八九十两]+)\s*(' + object_cls + r')', query)
+            if cn_pairs:
+                num = CHINESE_NUMBERS.get(cn_pairs[-1][0])
+                if num is not None:
+                    object_count = num
+
+    # 4. 检索方式：统一 TopK
+    method = "TopK" if need_retrieval else None
     
     # 5. 提取属性条件
     attributes = []
@@ -180,5 +179,6 @@ def parse_output(output_text: str, query: str = "") -> Dict[str, Any]:
         "count_type": count_type,
         "method": method,
         "attributes": attributes,
+        "object_count": object_count,
         "raw_output": text
     }

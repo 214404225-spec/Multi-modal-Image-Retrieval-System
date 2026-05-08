@@ -44,14 +44,15 @@ conda activate MmIRS && python -m experiment.intent_experiment.run_intent_experi
 
 ## 架构
 
-系统采用 **程序化路由编排**（对应 v1.md 架构图），接收自然语言图像查询，通过本地 LLM 判断意图，然后根据查询是否包含属性条件（颜色、姿态、场景等）由代码确定性路由到两条检索路径之一。
+系统采用 **程序化路由编排**（对应 v1.md 架构图），接收自然语言图像查询，通过本地 LLM 判断意图，然后由代码做单一决策：是否需要 VL 精排。
 
 ```
-用户查询 → 意图识别(LLM) → 有属性条件? ──是→ 细粒度两阶段检索(粗排CLIP+精排VL)
-                                      ──否→ 常规检索(CLIP单阶段) → 回复格式化(LLM)
+用户查询 → 意图识别(LLM) → needs_vl? (计数 或 复杂属性)
+                                ├── 是 → VL精排(CLIP粗排+VL验证计数/属性)
+                                └── 否 → 常规检索(CLIP全短语编码) → 回复(模板)
 ```
 
-路由是**代码决策**（`pipeline.py` 中 `if attributes:`），不由 LLM 自行选择。LLM 负责 3 个核心环节：意图识别、VL 属性精排、回复格式化。
+路由是**代码决策**（`pipeline.py` 中 `needs_vl = bool(object_count) or bool(complex_attrs)`），不由 LLM 自行选择。LLM 负责 2 个核心环节：意图识别、VL 精排。回复使用纯模板。
 
 ### Web 前端：`web_app/`
 
@@ -72,22 +73,24 @@ conda activate MmIRS && python -m experiment.intent_experiment.run_intent_experi
 3. 创建 `RegularRetrievalModule`，传入共享的 CLIP 编码器。
 4. 创建 `FineGrainedRetrievalModule`，同时传入共享的 CLIP 编码器 **和** 常规检索模块的 `OfflineIndexer`——使两个模块查询同一个向量数据库。
 5. 通过 `data_load.py` 发现图像，经 `RegularRetrievalModule.offline_indexing()` 建立索引。
-6. `chat()` 方法：意图识别 → 判定路由（代码决策）→ 检索 → LLM 格式化回复。
+6. `chat()` 方法：意图识别 → 判定路由（代码决策）→ 检索 → 模板格式化回复。
 
 ### 路由逻辑（`pipeline.py:chat()` 方法）
 
-- 无属性条件 -> 常规检索，有属性条件 -> 细粒度检索
+- 单一决策：`needs_vl`（物体数量 或 非CLIP友好属性）
 - `IntentRecognitionModule.analyze_intent()` 解析用户查询。
 - 如果 `need_retrieval=False` → 直接回复"不需要检索"。
-- 如果 `need_retrieval=True` 且 `attributes` 非空 → 细粒度两阶段检索。
-- 如果 `need_retrieval=True` 且 `attributes` 为空 → 常规检索。
 - 如果未提取到类别 → 回退：用原始查询做常规检索。
+- 如果 `needs_vl` → **VL 精排**：CLIP 粗排（裸类别）→ VL 验证（计数 / 属性合并为一次调用）。
+- 如果 `!needs_vl` → **CLIP-only**：编码全短语（如 `"白色的狗"`、`"3只狗"`）直接检索。
+
+CLIP 友好属性（颜色/大小/明暗）与无属性查询归入同一条 CLIP-only 路径。计数与复杂属性（姿态/场景/视角等）归入同一条 VL 路径。
 
 ### 意图识别：`intent_module/`
 
-`IntentRecognitionModule` 将用户查询通过 LangChain 链 `PromptTemplate` → `ChatOllama` → `StrOutputParser` 发送。结构化输出由 `parser.py` 解析为：`need_retrieval`、`category`、`count`、`count_type`、`method`（TopK / 卡阈值）、`attributes`。
+`IntentRecognitionModule` 将用户查询通过 LangChain 链 `PromptTemplate` → `ChatOllama` → `StrOutputParser` 发送。结构化输出由 `parser.py` 解析为：`need_retrieval`、`category`、`count`、`count_type`、`method`（统一 TopK）、`attributes`、`object_count`。
 
-`parser.py` 包含多层回退逻辑：LLM 未提取到类别时从常见物体列表匹配；LLM 误判数量时从原始 query 提取数字覆盖。
+`parser.py` 包含多层回退逻辑：LLM 未提取到类别时从常见物体列表匹配；LLM 误判数量时从原始 query 提取数字覆盖。`object_count`（图片里有几个物体）与 `count`（返回几张图片）通过量词区分——`张/幅` 是图片量词，`只/个/条/头/匹/群` 是物体量词，物体量词统一用 `个` 构建 VL 提示词。
 
 ### 常规检索：`regular_retrieval_module/`
 
@@ -97,15 +100,16 @@ conda activate MmIRS && python -m experiment.intent_experiment.run_intent_experi
 
 ### 细粒度检索：`fine_grained_retrieval_module/`
 
-针对**有属性条件查询**的两阶段检索：
-1. **粗排阶段**（`OnlineRetriever`）：只用类别构建查询（属性留给 VL 精排），经 Chinese RoBERTa 编码，在共享向量数据库中做相似度搜索。粗排取 `count * 3`（保底 15，非整数 count 时保底 30）个候选。「卡阈值」方法先按 0.8 阈值过滤再截断至前 60。
-2. **精排阶段**（`VLRefiner`）：所有粗排候选送 VL 做二分类验证（是/否），VL 通过则保留并按 CLIP 粗排分排序，VL 不通过则剔除。精排后 TopK 按用户请求数量精确裁剪。
+针对**需要 VL 精排的查询**（物体数量 或 复杂属性），采用两阶段检索：
+
+1. **粗排阶段**（`OnlineRetriever`）：只用裸类别构建查询，经 Chinese RoBERTa 编码，在共享向量数据库中做相似度搜索。有物体数量时 candidate pool = `count × object_count × 2`（保底 30），否则取 `count × 3`（保底 15）。
+2. **精排阶段**（`VLRefiner.refine()`）：所有粗排候选送 VL 做二分类验证。如有物体数量则验证计数（"恰好有 N 个 {类别}"），如有属性则合并验证（"恰好有 N 个 {属性}的{类别}"）。通过则保留 CLIP 粗排分，不通过则剔除。精排后裁剪到图片请求数量。
 
 ### 已知瓶颈
 
 **VL 精排精度仍不及 SOTA API（如 Gemini-Flash、GPT-4o）**，复杂属性组合（"棕色站立的狗"）的细粒度判断仍存在漏判。理想混合架构（CLIP 本地粗筛 + 云端多模态 API 精排）详见 README「架构演进」章节。
 
-**不支持专名/人名检索**。CLIP 文本编码器对专有名词（人名、地名、品牌等）无感知——这些 token 在训练语料中极少出现或不存在，无法编码为有意义的 embedding 向量。当用户查询包含专名时，意图模块会将其退化为泛化类别（"庄方宜"→"人"），检索本质是在用泛化类别做相似度搜索。由于 Taiyi-CLIP 的零样本泛化能力，即便图像集中没有对应类别，模型也会在 embedding 空间中找出距离最近的图像（如将"人"映射到视觉最接近的灵长类动物），但结果与原始专名无实际关联。同时 **TopK 路径不设最低相似度阈值**，导致低分匹配照常返回。格式化 LLM 最后会将用户 query 中的专名与这些无关结果强行缝合，产生虚假的相关性陈述。如需支持专名检索，需引入额外的人脸标注、图像标签或关键词索引等信号源。
+**不支持专名/人名检索**。CLIP 文本编码器对专有名词（人名、地名、品牌等）无感知——这些 token 在训练语料中极少出现或不存在，无法编码为有意义的 embedding 向量。当用户查询包含专名时，意图模块会将其退化为泛化类别（"庄方宜"→"人"），检索本质是在用泛化类别做相似度搜索。由于 Taiyi-CLIP 的零样本泛化能力，即便图像集中没有对应类别，模型也会在 embedding 空间中找出距离最近的图像（如将"人"映射到视觉最接近的灵长类动物），但结果与原始专名无实际关联。同时 **TopK 路径不设最低相似度阈值**，导致低分匹配照常返回，产生虚假的相关性印象。如需支持专名检索，需引入额外的人脸标注、图像标签或关键词索引等信号源。
 
 ### 共享组件：`shared/`
 
@@ -123,15 +127,13 @@ conda activate MmIRS && python -m experiment.intent_experiment.run_intent_experi
 | 索引规模 | `REGULAR_INDEX_SIZE` | `-1`（全部图像） |
 | HuggingFace 镜像 | `pipeline.py:8` / `HF_ENDPOINT` | `https://huggingface.co` |
 | VL 精排策略 | `fine_grained_retrieval_module/vl_models.py` | 二分类（是/否），通过则保留 CLIP 粗排分 |
-| VL 硬过滤阈值 | `fine_grained_retrieval_module/vl_models.py:53` | 0.2 |
-| 粗排候选倍数 | `agent_pipeline/pipeline.py:142` | count × 3（保底 15） |
-| 粗排阈值（卡阈值）| `fine_grained_retrieval_module/online_retriever.py` | 0.8 + 截断至 60 |
+| 粗排候选倍数 | `agent_pipeline/pipeline.py` | count × 3（保底 15） |
 | 磁盘缓存 | `regular_retrieval_module/offline_indexer.py` | `cache/image_features.pt` |
 | Top-K 默认值 | `pipeline.py:_resolve_top_k()` | 5 |
 
 ## 关键设计模式
 
-- **程序化路由**：路由决策由代码（`if attributes:`）而非 LLM 做出，消除小模型路由不可靠的问题。
+- **程序化路由**：路由决策由代码（`needs_vl = bool(object_count) or bool(complex_attrs)`）而非 LLM 做出，消除小模型路由不可靠的问题。
 - **共享向量数据库**：`RegularRetrievalModule` 拥有 `OfflineIndexer`；`FineGrainedRetrievalModule` 通过构造函数注入接收。两个模块共享同一个 `CLIPEncoder` 实例。
 - **Taiyi-CLIP 双模型编码**：文本编码使用 Chinese RoBERTa（`models/Chinese_RoBERTa/`），原生支持中文；图像编码使用 CLIP ViT-L/14（`models/clip_ViT/`）。两者经投影对齐到同一 embedding 空间。
 - **意图解析多层回退**：LLM 输出优先 → LLM 漏掉属性 → 类别从常见属性列表回退提取 → 属性从 query 中精确匹配提取。

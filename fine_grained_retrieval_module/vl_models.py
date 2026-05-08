@@ -63,13 +63,14 @@ class VLRefiner:
         self.vl_manager = vl_manager
 
     def refine(self, results: List[Dict], category: str,
-               attributes: List[str], top_k: int = None,
+               attributes: List[str] = None, object_count: int = None,
+               top_k: int = None,
                progress_callback=None) -> List[Dict]:
         """
-        两阶段检索的精排阶段：VL 二分类验证属性条件（是/否）。
+        VL 精排：对粗排候选图像验证属性条件 / 物体数量（可合并）。
         VL 通过 → 保留 CLIP 粗排分排序；VL 不通过 → 剔除。
         """
-        if not attributes or not results:
+        if not results:
             return results
 
         if self.vl_manager.vl_model is None:
@@ -78,9 +79,16 @@ class VLRefiner:
 
         max_refine = len(results)
         candidates = results[:max_refine]
-        print(f"[VL_Refine] 开始精排，对 {max_refine} 张候选图像验证属性: {attributes}")
 
-        attr_text = "、".join(attributes)
+        # 构建日志描述
+        parts = []
+        if object_count:
+            parts.append(f"{object_count}个{category}")
+        if attributes:
+            parts.append(f"属性={attributes}")
+        desc = ", ".join(parts) if parts else category
+        print(f"[VL_Refine] 开始精排，对 {max_refine} 张候选验证: {desc}")
+
         passed = []
         for i, r in enumerate(candidates):
             print(f"  [VL_Refine] 验证候选 {i+1}/{max_refine}...")
@@ -91,15 +99,16 @@ class VLRefiner:
                     "total": max_refine,
                     "current_image": os.path.basename(r["url"])
                 })
-            vl_score = self._score_attributes(r["url"], category, attr_text)
+            vl_score = self._score_attributes(
+                r["url"], category, attributes, object_count
+            )
             r["vl_score"] = vl_score
             if vl_score > 0:
                 r["final_score"] = r.get("score", 0)
                 passed.append(r)
             else:
-                print(f"    -> 属性不匹配，已剔除")
+                print(f"    -> 不匹配，已剔除")
 
-        # 未进入精排的候选保持原分数
         for r in results[max_refine:]:
             r["vl_score"] = r.get("score", 0)
             r["final_score"] = r.get("score", 0)
@@ -109,13 +118,10 @@ class VLRefiner:
         print(f"[VL_Refine] 精排完成，通过 {len(passed)}/{max_refine} 张，共 {len(refined)} 张")
         return refined[:top_k] if top_k else refined
 
-    def _score_attributes(self, image_path: str, category: str,
-                          attr_text: str) -> float:
+    def _score_with_prompt(self, image_path: str, prompt: str) -> float:
         """
-        使用 VL 模型对单张图像进行属性匹配评分（带超时和重试）。
-
-        Returns:
-            0.0 ~ 1.0 之间的属性匹配分数
+        核心 VL 评分：编码图像 → 调用 VL → 解析是/否响应。
+        返回 1.0（通过）或 0.0（不通过/失败）。
         """
         if self.vl_manager.vl_model is None:
             return 0.0
@@ -130,10 +136,6 @@ class VLRefiner:
             ext = image_path.lower().split(".")[-1]
             mime_type = "image/jpeg" if ext in ["jpg", "jpeg"] else "image/png"
 
-            prompt = (
-                f"请判断这张图片中的{category}是否符合以下属性条件：{attr_text}。\n"
-                f"只回复「是」或「否」，不要回复任何其他内容。"
-            )
             messages = [
                 HumanMessage(content=[
                     {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_base64}"}},
@@ -154,6 +156,31 @@ class VLRefiner:
         except Exception as e:
             print(f"[VLRefiner] 评分失败 [{os.path.basename(image_path)}]: {str(e)}")
             return 0.0
+
+    def _score_attributes(self, image_path: str, category: str,
+                          attributes: list = None,
+                          object_count: int = None) -> float:
+        """使用 VL 模型对单张图像进行属性 / 物体数量验证（可合并）。"""
+        if object_count and attributes:
+            attr_text = "".join(attributes)
+            prompt = (
+                f"请判断这张图片中是否恰好有{object_count}个"
+                f"{attr_text}的{category}。\n"
+                f"只回复「是」或「否」，不要回复任何其他内容。"
+            )
+        elif object_count:
+            prompt = (
+                f"请判断这张图片中是否恰好有{object_count}个"
+                f"{category}。\n"
+                f"只回复「是」或「否」，不要回复任何其他内容。"
+            )
+        else:
+            attr_text = "、".join(attributes) if attributes else ""
+            prompt = (
+                f"请判断这张图片中的{category}是否符合以下属性条件：{attr_text}。\n"
+                f"只回复「是」或「否」，不要回复任何其他内容。"
+            )
+        return self._score_with_prompt(image_path, prompt)
 
     def _invoke_vl_with_retry(self, messages, image_path: str):
         """带超时和重试的 VL 模型调用。成功返回 content，失败返回 None。

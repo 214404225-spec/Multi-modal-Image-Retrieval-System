@@ -15,13 +15,11 @@ class OnlineRetriever:
         self.clip_encoder = clip_encoder
         self.offline_indexer = offline_indexer
 
-    def retrieve(self, category: str, method: str = "TopK",
-                 target_count: int = None, top_k: int = 5,
-                 threshold: float = 0.8,
+    def retrieve(self, category: str, top_k: int = 5,
                  candidate_images: Optional[List[str]] = None,
                  attributes: Optional[List[str]] = None) -> Dict[str, Any]:
         """
-        粗排阶段：CLIP文本编码查询 → 与向量库中图像特征做相似度计算。
+        粗排阶段：CLIP文本编码查询 → 与向量库中图像特征做相似度计算 → Top-K。
         精排阶段由 VL_Refine 完成。
         """
         try:
@@ -49,26 +47,17 @@ class OnlineRetriever:
             if not results:
                 return {
                     "search_query": search_query,
-                    "method": method,
+                    "method": "TopK",
                     "results": [],
                     "message": "未找到匹配结果"
                 }
 
             results = sorted(results, key=lambda x: x["score"], reverse=True)
-
-            if method == "TopK":
-                results = results[:top_k]
-            elif method == "卡阈值":
-                results = [r for r in results if r["score"] >= threshold]
-                if len(results) > 60:
-                    print(f"  [粗排] 卡阈值命中 {len(results)} 条，截断至前 60")
-                    results = results[:60]
-            else:
-                results = results[:top_k]
+            results = results[:top_k]
 
             return {
                 "search_query": search_query,
-                "method": method,
+                "method": "TopK",
                 "results": results,
                 "has_attributes": bool(attributes)
             }
