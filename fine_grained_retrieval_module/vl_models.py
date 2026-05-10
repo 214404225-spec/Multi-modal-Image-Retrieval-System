@@ -7,12 +7,10 @@ import os
 import concurrent.futures
 from typing import Dict, List
 
-from .constants import VL_OLLAMA_MODEL
+from .constants import VL_OLLAMA_MODEL, VL_PARALLEL_WORKERS
 
-# VL 调用超时（秒），单张图像推理通常在 5-15s，设置 60s 兜底
-VL_CALL_TIMEOUT = 60
-VL_HTTP_TIMEOUT = 50  # HTTP 层超时，必须 < VL_CALL_TIMEOUT 以确保线程不会因 HTTP 请求未完成而被遗弃
-VL_MAX_RETRIES = 1  # 超时后重试次数
+VL_HTTP_TIMEOUT = 50  # ChatOllama httpx 超时（秒），单张图像推理通常在 5-15s
+VL_MAX_RETRIES = 1  # 超时/异常后重试次数
 
 
 class VLModelManager:
@@ -39,13 +37,21 @@ class VLModelManager:
             from langchain_ollama import ChatOllama
             self.vl_model = ChatOllama(
                 model=self.model_name, temperature=0.0,
-                timeout=VL_HTTP_TIMEOUT,  # 必须 < VL_CALL_TIMEOUT，确保 HTTP 先超时释放线程
+                timeout=VL_HTTP_TIMEOUT,
             )
             print(f"[VL模型] Ollama 初始化成功（模型: {self.model_name}）")
             return True
         except Exception as e:
             print(f"[VL模型] Ollama初始化失败: {str(e)}")
             return False
+
+    def create_chat_model(self):
+        """创建独立的 ChatOllama 实例（轻量级，用于并行验证）。"""
+        from langchain_ollama import ChatOllama
+        return ChatOllama(
+            model=self.model_name, temperature=0.0,
+            timeout=VL_HTTP_TIMEOUT,
+        )
 
     def reset_model(self):
         """重置 VL 模型实例，强制关闭旧 HTTP 连接。超时后调用以避免后续请求排队。"""
@@ -65,10 +71,13 @@ class VLRefiner:
     def refine(self, results: List[Dict], category: str,
                attributes: List[str] = None, object_count: int = None,
                top_k: int = None,
-               progress_callback=None) -> List[Dict]:
+               progress_callback=None,
+               max_workers: int = None) -> List[Dict]:
         """
         VL 精排：对粗排候选图像验证属性条件 / 物体数量（可合并）。
         VL 通过 → 保留 CLIP 粗排分排序；VL 不通过 → 剔除。
+
+        max_workers: 并行验证的 worker 数（默认读取 VL_PARALLEL_WORKERS，1 即串行）。
         """
         if not results:
             return results
@@ -76,6 +85,9 @@ class VLRefiner:
         if self.vl_manager.vl_model is None:
             print("[VL_Refine] VL 模型未初始化，跳过精排，返回原始粗排结果")
             return results
+
+        if max_workers is None:
+            max_workers = VL_PARALLEL_WORKERS
 
         max_refine = len(results)
         candidates = results[:max_refine]
@@ -87,27 +99,69 @@ class VLRefiner:
         if attributes:
             parts.append(f"属性={attributes}")
         desc = ", ".join(parts) if parts else category
-        print(f"[VL_Refine] 开始精排，对 {max_refine} 张候选验证: {desc}")
 
-        passed = []
-        for i, r in enumerate(candidates):
-            print(f"  [VL_Refine] 验证候选 {i+1}/{max_refine}...")
-            if progress_callback:
-                progress_callback({
-                    "stage": "vl_refine",
-                    "current": i + 1,
-                    "total": max_refine,
-                    "current_image": os.path.basename(r["url"])
-                })
-            vl_score = self._score_attributes(
-                r["url"], category, attributes, object_count
-            )
-            r["vl_score"] = vl_score
-            if vl_score > 0:
-                r["final_score"] = r.get("score", 0)
-                passed.append(r)
-            else:
-                print(f"    -> 不匹配，已剔除")
+        if max_workers > 1 and len(candidates) > 1:
+            mode = f"并行({max_workers} workers)"
+        else:
+            mode = "串行"
+        print(f"[VL_Refine] 开始精排({mode})，对 {max_refine} 张候选验证: {desc}")
+
+        if max_workers <= 1 or len(candidates) <= 1:
+            # 串行路径
+            passed = []
+            for i, r in enumerate(candidates):
+                print(f"  [VL_Refine] 验证候选 {i+1}/{max_refine}...")
+                if progress_callback:
+                    progress_callback({
+                        "stage": "vl_refine",
+                        "current": i + 1,
+                        "total": max_refine,
+                        "current_image": os.path.basename(r["url"])
+                    })
+                vl_score = self._score_attributes(
+                    r["url"], category, attributes, object_count
+                )
+                r["vl_score"] = vl_score
+                if vl_score > 0:
+                    r["final_score"] = r.get("score", 0)
+                    passed.append(r)
+                else:
+                    print(f"    -> 不匹配，已剔除")
+        else:
+            # 并行路径：每个 worker 使用独立的 ChatOllama 实例
+            passed = []
+            completed = 0
+
+            def verify_single(candidate):
+                url = candidate["url"]
+                chat_model = self.vl_manager.create_chat_model()
+                vl_score = self._score_attributes(
+                    url, category, attributes, object_count, chat_model=chat_model
+                )
+                candidate["vl_score"] = vl_score
+                if vl_score > 0:
+                    candidate["final_score"] = candidate.get("score", 0)
+                return candidate, vl_score
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(verify_single, r): r for r in candidates}
+                for future in concurrent.futures.as_completed(futures):
+                    candidate, vl_score = future.result()
+                    completed += 1
+                    if progress_callback:
+                        progress_callback({
+                            "stage": "vl_refine",
+                            "current": completed,
+                            "total": max_refine,
+                            "current_image": os.path.basename(candidate["url"])
+                        })
+                    if vl_score > 0:
+                        passed.append(candidate)
+                    else:
+                        print(f"  [VL_Refine] 候选不匹配，已剔除")
+
+            # 并行完成后的结果按分数排序
+            passed.sort(key=lambda x: x.get("final_score", 0), reverse=True)
 
         for r in results[max_refine:]:
             r["vl_score"] = r.get("score", 0)
@@ -118,12 +172,14 @@ class VLRefiner:
         print(f"[VL_Refine] 精排完成，通过 {len(passed)}/{max_refine} 张，共 {len(refined)} 张")
         return refined[:top_k] if top_k else refined
 
-    def _score_with_prompt(self, image_path: str, prompt: str) -> float:
+    def _score_with_prompt(self, image_path: str, prompt: str, chat_model=None) -> float:
         """
         核心 VL 评分：编码图像 → 调用 VL → 解析是/否响应。
         返回 1.0（通过）或 0.0（不通过/失败）。
+        chat_model: 可选的外部 ChatOllama 实例（并行模式下使用，避免共享实例）。
         """
-        if self.vl_manager.vl_model is None:
+        vl_model = chat_model if chat_model is not None else self.vl_manager.vl_model
+        if vl_model is None:
             return 0.0
 
         import base64
@@ -143,7 +199,7 @@ class VLRefiner:
                 ])
             ]
 
-            content = self._invoke_vl_with_retry(messages, image_path)
+            content = self._invoke_vl_with_retry(messages, image_path, chat_model=chat_model)
             if content is None:
                 return 0.0
 
@@ -159,8 +215,11 @@ class VLRefiner:
 
     def _score_attributes(self, image_path: str, category: str,
                           attributes: list = None,
-                          object_count: int = None) -> float:
-        """使用 VL 模型对单张图像进行属性 / 物体数量验证（可合并）。"""
+                          object_count: int = None,
+                          chat_model=None) -> float:
+        """使用 VL 模型对单张图像进行属性 / 物体数量验证（可合并）。
+        chat_model: 可选的外部 ChatOllama 实例（并行模式下使用）。
+        """
         if object_count and attributes:
             attr_text = "".join(attributes)
             prompt = (
@@ -180,31 +239,27 @@ class VLRefiner:
                 f"请判断这张图片中的{category}是否符合以下属性条件：{attr_text}。\n"
                 f"只回复「是」或「否」，不要回复任何其他内容。"
             )
-        return self._score_with_prompt(image_path, prompt)
+        return self._score_with_prompt(image_path, prompt, chat_model=chat_model)
 
-    def _invoke_vl_with_retry(self, messages, image_path: str):
-        """带超时和重试的 VL 模型调用。成功返回 content，失败返回 None。
+    def _invoke_vl_with_retry(self, messages, image_path: str, chat_model=None):
+        """带重试的 VL 模型调用。成功返回 content，失败返回 None。
 
-        超时后重置模型实例以强制关闭底层 HTTP 连接，避免后续请求
-        因 Ollama 仍在处理已放弃的旧请求而排队卡死。
+        ChatOllama 自带 httpx 超时（VL_HTTP_TIMEOUT），无需额外包装。
+        chat_model: 可选的外部 ChatOllama 实例（并行模式下使用）。
         """
+        is_private = chat_model is not None
+        vl_model = chat_model if is_private else self.vl_manager.vl_model
+
         last_error = None
         for attempt in range(VL_MAX_RETRIES + 1):
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             try:
-                future = executor.submit(self.vl_manager.vl_model.invoke, messages)
-                response = future.result(timeout=VL_CALL_TIMEOUT)
-                executor.shutdown(wait=False)
+                response = vl_model.invoke(messages)
                 return response.content if hasattr(response, 'content') else str(response)
-            except concurrent.futures.TimeoutError:
-                last_error = f"超时 ({VL_CALL_TIMEOUT}s)"
-                executor.shutdown(wait=False)
-                self.vl_manager.reset_model()  # 强制关闭旧连接，避免后续请求排队
-                if attempt < VL_MAX_RETRIES:
-                    print(f"    [VL超时] 重试 {attempt + 1}/{VL_MAX_RETRIES}...")
             except Exception as e:
                 last_error = str(e)
-                executor.shutdown(wait=False)
+                if not is_private:
+                    self.vl_manager.reset_model()
+                    vl_model = self.vl_manager.vl_model
                 if attempt < VL_MAX_RETRIES:
                     print(f"    [VL异常] 重试 {attempt + 1}/{VL_MAX_RETRIES}: {e}")
 

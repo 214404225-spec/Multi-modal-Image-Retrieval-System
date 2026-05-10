@@ -50,7 +50,8 @@ class FineGrainedRetrievalModule:
                               attributes: List[str] = None,
                               object_count: int = None,
                               top_k: int = None,
-                              progress_callback=None) -> List[Dict]:
+                              progress_callback=None,
+                              max_workers: int = None) -> List[Dict]:
         """
         VL 精排（VL_Refine）：对属性条件 / 物体数量做二分类验证（是/否）。
         通过则保留，不通过则剔除。
@@ -58,4 +59,5 @@ class FineGrainedRetrievalModule:
         return self.vl_refiner.refine(
             results, category,
             attributes=attributes, object_count=object_count,
-            top_k=top_k, progress_callback=progress_callback)
+            top_k=top_k, progress_callback=progress_callback,
+            max_workers=max_workers)

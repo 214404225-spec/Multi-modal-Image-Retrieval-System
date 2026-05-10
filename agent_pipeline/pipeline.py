@@ -99,95 +99,12 @@ class MultiModalAgentPipeline:
 
         1. 意图识别 → 2. 判定路由 → 3. 检索 → 4. 格式化回复
         """
-        t_start = time.time()
+        result = self._chat_impl(user_query)
+        return {"output": result["output"]}
 
-        # Step 1: 意图识别
-        t0 = time.time()
-        intent = self.intent_module.analyze_intent(user_query)
-        t_intent = time.time() - t0
-        print(f"[意图] {intent.get('need_retrieval')} | "
-              f"类别={intent.get('category')} | "
-              f"属性={intent.get('attributes')} | "
-              f"方式={intent.get('method')} | "
-              f"数量={intent.get('count')} | "
-              f"耗时={t_intent:.1f}s")
-
-        need_retrieval = intent.get("need_retrieval", False)
-        attributes = intent.get("attributes", [])
-        category = intent.get("category", "")
-        count = intent.get("count")
-        object_count = intent.get("object_count")
-
-        # Step 2: 程序化路由（不由 LLM agent 决定）
-        if not need_retrieval:
-            return {"output": "不需要检索。"}
-
-        if not category:
-            print(f"[路由] 常规检索（无类别，用原始查询）")
-            k = self._extract_count(user_query)
-            res = self.regular_retrieval.retrieve(user_query, top_k=k)
-            res = _trim_result_paths(res)
-            output = _format_response(user_query, res)
-            return {"output": output}
-
-        # 判断是否需要 VL 精排：物体数量 或 复杂属性
-        complex_attrs = [a for a in attributes if not self._is_clip_friendly(a)]
-        needs_vl = bool(object_count) or bool(complex_attrs)
-
-        if needs_vl:
-            if object_count:
-                base_k = count if isinstance(count, int) else 5
-                coarse_k = max(base_k * object_count * 2, 30)
-            else:
-                coarse_k = max((count or 5) * 3, 15) if isinstance(count, int) else 30
-            print(f"[路由] VL精排: 类别={category}, "
-                  f"计数={object_count or '无'}, 属性={complex_attrs or '无'}")
-            t1 = time.time()
-            res = self.fine_grained.online_retrieval(
-                category=category, top_k=coarse_k,
-            )
-            t_retrieval = time.time() - t1
-            t_vl = 0
-            if "results" in res and res["results"]:
-                t2 = time.time()
-                res["results"] = self.fine_grained.refine_by_attributes(
-                    res["results"], category,
-                    attributes=complex_attrs if complex_attrs else None,
-                    object_count=object_count,
-                )
-                t_vl = time.time() - t2
-                if isinstance(count, int) and count > 0:
-                    if len(res["results"]) > count:
-                        print(f"[路由] 精排后裁剪 {len(res['results'])} → {count} 张")
-                    res["results"] = res["results"][:count]
-                res["refinement_applied"] = True
-                res["refinement_method"] = "VL_Refine"
-            res = _trim_result_paths(res)
-            output = _format_response(user_query, res)
-            t_total = time.time() - t_start
-            print(f"[计时] 意图={t_intent:.1f}s 检索={t_retrieval:.1f}s VL={t_vl:.1f}s 总计={t_total:.1f}s")
-            return {"output": output}
-
-        # CLIP-only：编码全短语直接检索
-        search_query = self._build_search_query(user_query, category)
-        if attributes:
-            search_query = "".join(attributes) + "的" + search_query
-        print(f"[路由] 常规检索: {search_query}")
-        k = self._resolve_top_k(count)
-        t1 = time.time()
-        res = self.regular_retrieval.retrieve(
-            query=search_query, top_k=k
-        )
-        t_retrieval = time.time() - t1
-        res = _trim_result_paths(res)
-        output = _format_response(user_query, res)
-        t_total = time.time() - t_start
-        print(f"[计时] 意图={t_intent:.1f}s 检索={t_retrieval:.1f}s 总计={t_total:.1f}s")
-        return {"output": output}
-
-    def chat_structured(self, user_query: str, progress_callback=None) -> dict:
+    def _chat_impl(self, user_query: str, progress_callback=None) -> dict:
         """
-        与 chat() 相同的路由逻辑，但返回结构化数据供 Web 前端使用。
+        核心路由逻辑（chat 和 chat_structured 共享）。
 
         Returns:
             {"output": "<formatted string>", "structured": {...}}
@@ -325,6 +242,9 @@ class MultiModalAgentPipeline:
                 "total_results": len(res.get("results", []))
             }
         }
+
+    def chat_structured(self, user_query: str, progress_callback=None) -> dict:
+        return self._chat_impl(user_query, progress_callback)
 
     # CLIP 能可靠处理的简单属性（颜色、大小、明暗），无需 VL 验证
     @staticmethod

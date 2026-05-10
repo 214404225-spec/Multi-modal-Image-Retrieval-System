@@ -63,7 +63,7 @@ conda activate MmIRS && python -m experiment.intent_experiment.run_intent_experi
 - `/images/` — 从 `test_images/` 静态提供图片文件
 - `/` — 单文件前端（`static/index.html`），零外部依赖
 
-前端通过 SSE 接收进度（VL 精排阶段实时显示当前候选图像名和进度条），结果以缩略图网格展示，点击打开灯箱查看大图和分数详情。Pipeline 新增 `chat_structured()` 方法（`chat()` 保持不变），支持 `progress_callback` 回调，将 VL 精排的逐候选进度实时推送到前端。
+前端通过 SSE 接收进度（VL 精排阶段实时显示当前候选图像名和进度条），结果以缩略图网格展示，点击打开灯箱查看大图和分数详情。Pipeline 中 `chat()` 和 `chat_structured()` 共享核心逻辑 `_chat_impl()`（仅返回格式不同），`chat_structured()` 额外支持 `progress_callback` 回调，将 VL 精排的逐候选进度实时推送到前端。
 
 ### 编排器：`agent_pipeline/pipeline.py`
 
@@ -103,7 +103,7 @@ CLIP 友好属性（颜色/大小/明暗）与无属性查询归入同一条 CLI
 针对**需要 VL 精排的查询**（物体数量 或 复杂属性），采用两阶段检索：
 
 1. **粗排阶段**（`OnlineRetriever`）：只用裸类别构建查询，经 Chinese RoBERTa 编码，在共享向量数据库中做相似度搜索。有物体数量时 candidate pool = `count × object_count × 2`（保底 30），否则取 `count × 3`（保底 15）。
-2. **精排阶段**（`VLRefiner.refine()`）：所有粗排候选送 VL 做二分类验证。如有物体数量则验证计数（"恰好有 N 个 {类别}"），如有属性则合并验证（"恰好有 N 个 {属性}的{类别}"）。通过则保留 CLIP 粗排分，不通过则剔除。精排后裁剪到图片请求数量。
+2. **精排阶段**（`VLRefiner.refine()`）：所有粗排候选送 VL 做二分类验证。如有物体数量则验证计数（"恰好有 N 个 {类别}"），如有属性则合并验证（"恰好有 N 个 {属性}的{类别}"）。通过则保留 CLIP 粗排分，不通过则剔除。默认串行验证，可通过 `VL_PARALLEL_WORKERS` 环境变量开启并行（需配合 `OLLAMA_NUM_PARALLEL`，详见 README 已知限制）。每个 worker 持有独立的 `ChatOllama` 实例避免线程竞争。精排后裁剪到图片请求数量。
 
 ### 已知瓶颈
 
@@ -121,6 +121,7 @@ CLIP 友好属性（颜色/大小/明暗）与无属性查询归入同一条 CLI
 |------|------|---------|
 | **意图识别 LLM** | `INTENT_MODEL` | `qwen3:8b` |
 | **VL 模型** | `VL_MODEL` | `qwen3-vl:8b` |
+| **VL 并行 worker 数** | `VL_PARALLEL_WORKERS` | `1`（串行；并行需配合 `OLLAMA_NUM_PARALLEL`） |
 | **Web 服务端口** | `uvicorn --port` 参数 | `8000` |
 | **Web 服务主机** | `uvicorn --host` 参数 | `0.0.0.0` |
 | CLIP 模型路径 | `*/constants.py`（基于 PROJECT_ROOT 计算） | `models/clip_ViT` |
@@ -137,7 +138,7 @@ CLIP 友好属性（颜色/大小/明暗）与无属性查询归入同一条 CLI
 - **共享向量数据库**：`RegularRetrievalModule` 拥有 `OfflineIndexer`；`FineGrainedRetrievalModule` 通过构造函数注入接收。两个模块共享同一个 `CLIPEncoder` 实例。
 - **Taiyi-CLIP 双模型编码**：文本编码使用 Chinese RoBERTa（`models/Chinese_RoBERTa/`），原生支持中文；图像编码使用 CLIP ViT-L/14（`models/clip_ViT/`）。两者经投影对齐到同一 embedding 空间。
 - **意图解析多层回退**：LLM 输出优先 → LLM 漏掉属性 → 类别从常见属性列表回退提取 → 属性从 query 中精确匹配提取。
-- **Ollama**：LLM 和 VL 模型依赖 Ollama 本地推理。VL 逐候选图像做二分类验证，粗排阶段控制候选数量避免过载。
+- **Ollama**：LLM 和 VL 模型依赖 Ollama 本地推理。VL 默认 3 个 worker 并行做二分类验证，每个 worker 持有独立 `ChatOllama` 实例。粗排阶段控制候选数量避免过载。
 - **SSE 流式进度**：Web 前端通过 Server-Sent Events 接收检索进度，VL 精排阶段实时推送当前验证的图像名和进度（`web_app/app.py` 中用 `asyncio.Queue` 桥接同步 pipeline 与异步 SSE）。
-- **chat_structured() 与 chat() 并存**：`chat_structured()` 返回结构化 JSON + 支持 progress_callback；`chat()` 保持原有行为不变。CLI 和 Web 两个入口互不影响。
+- **chat/chat_structured 共享 _chat_impl()**：核心路由逻辑集中在 `_chat_impl()` 私有方法中；`chat()` 提取 `output` 字段返回；`chat_structured()` 返回完整结构化数据 + 支持 progress_callback。CLI 和 Web 两个入口互不影响，修改路由只需改一处。
 - **图像数据**：期望图像位于 `test_images/` 目录下。`data_load.py` 提供图像发现、计数和采样工具。
