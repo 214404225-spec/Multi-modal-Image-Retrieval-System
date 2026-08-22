@@ -13,6 +13,21 @@ VL_HTTP_TIMEOUT = 50  # ChatOllama httpx 超时（秒），单张图像推理通
 VL_MAX_RETRIES = 1  # 超时/异常后重试次数
 
 
+def parse_vl_yes_no(content: str) -> bool:
+    """解析 VL 的「是/否」回复，返回是否通过验证。
+
+    否定形式优先判定："不是"、"不是的"、"否" 等必须判否，
+    避免因 "不是" 中包含 "是" 字而被误判为通过。
+    失败/含糊回复一律按不通过处理（安全默认：剔除候选）。
+    """
+    text = content.strip().strip("。.！!？?，,、 \t\n")
+    if not text:
+        return False
+    if text.startswith("不是") or text.startswith("并非") or "否" in text:
+        return False
+    return text.startswith("是")
+
+
 class VLModelManager:
     """VL模型管理器，通过Ollama调用VL模型"""
 
@@ -206,9 +221,7 @@ class VLRefiner:
             content = content.strip()
             print(f"    [VL raw] {content}")
 
-            if "是" in content and "否" not in content:
-                return 1.0
-            return 0.0
+            return 1.0 if parse_vl_yes_no(content) else 0.0
         except Exception as e:
             print(f"[VLRefiner] 评分失败 [{os.path.basename(image_path)}]: {str(e)}")
             return 0.0

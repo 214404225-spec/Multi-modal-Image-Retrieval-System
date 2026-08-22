@@ -53,7 +53,7 @@ def _scan_image_dirs() -> list[dict]:
 async def lifespan(app: FastAPI):
     """启动时初始化 pipeline 单例（模型加载 + 图像索引）。"""
     global pipeline, CURRENT_IMAGE_DIR
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     print(f"[Web] 图像目录: {CURRENT_IMAGE_DIR}")
     print("[Web] 正在初始化多模态检索流水线（加载模型 + 建立索引）...")
     pipeline = await loop.run_in_executor(
@@ -124,7 +124,7 @@ async def set_image_dir(request: Request):
     print(f"[Web] 切换图像目录: {CURRENT_IMAGE_DIR} → {new_dir} ({image_count} 张)")
     CURRENT_IMAGE_DIR = new_dir
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     pipeline = await loop.run_in_executor(
         None, lambda: MultiModalAgentPipeline(image_dir=CURRENT_IMAGE_DIR)
     )
@@ -155,7 +155,7 @@ async def chat_stream(request: Request):
 
     async def event_generator():
         queue: asyncio.Queue = asyncio.Queue()
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def progress_callback(data):
             loop.call_soon_threadsafe(queue.put_nowait, ("progress", data))
@@ -192,9 +192,10 @@ async def chat_stream(request: Request):
 
 @app.get("/images/{filename:path}")
 async def serve_image(filename: str):
-    """从当前图像目录提供图片文件。"""
-    file_path = os.path.join(CURRENT_IMAGE_DIR, filename)
-    if not os.path.isfile(file_path):
+    """从当前图像目录提供图片文件（限制在目录内，防止路径遍历）。"""
+    base_dir = os.path.realpath(CURRENT_IMAGE_DIR)
+    file_path = os.path.realpath(os.path.join(base_dir, filename))
+    if not file_path.startswith(base_dir + os.sep) or not os.path.isfile(file_path):
         return JSONResponse(status_code=404, content={"error": "图片不存在"})
     return FileResponse(file_path)
 

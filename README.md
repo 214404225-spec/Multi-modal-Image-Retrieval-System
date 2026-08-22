@@ -412,6 +412,16 @@ Pipeline 中 `chat()` 和 `chat_structured()` 共享核心逻辑 `_chat_impl()`�
 
 ```bash
 pip install -r requirements.txt
+
+# 环境变量配置（可选）：复制模板后按需修改，启动时由 python-dotenv 自动加载
+cp .env.example .env   # Windows PowerShell: Copy-Item .env.example .env
+```
+
+## 单元测试
+
+```bash
+# 核心纯函数逻辑测试（不加载模型、不依赖 Ollama，秒级完成）
+python -m pytest tests/ -v
 ```
 
 ## 模型本地部署
@@ -464,8 +474,8 @@ python scripts/download_models.py --verify-only
 ### Web 前端（推荐）
 
 ```bash
-# 启动 Web 服务
-python -m uvicorn web_app.app:app --host 0.0.0.0 --port 8000
+# 启动 Web 服务（本地使用建议绑定 127.0.0.1，服务无鉴权勿暴露公网）
+python -m uvicorn web_app.app:app --host 127.0.0.1 --port 8000
 ```
 
 浏览器打开 `http://localhost:8000`，输入中文自然语言查询即可：

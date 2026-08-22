@@ -8,12 +8,15 @@
 # 交互式命令行
 python -m agent_pipeline.main
 
-# Web 前端（推荐）
-python -m uvicorn web_app.app:app --host 0.0.0.0 --port 8000
+# Web 前端（推荐；本地使用建议绑定 127.0.0.1，避免暴露无鉴权服务）
+python -m uvicorn web_app.app:app --host 127.0.0.1 --port 8000
 # 浏览器打开 http://localhost:8000，直接查看检索图像
 
 # 运行批量测试（25 个预定义查询）
 python -m test_queries.main
+
+# 运行核心逻辑单元测试（不加载模型，秒级完成）
+python -m pytest tests/ -v
 
 # 下载 CLIP 模型
 python scripts/download_models.py --mirror hf-mirror
@@ -38,7 +41,7 @@ C:\Users\21440\.conda\envs\MmIRS\python.exe -m agent_pipeline.main
 # 运行意图识别实验（独立，不影响主程序）
 conda activate MmIRS && python -m experiment.intent_experiment.run_intent_experiment
 
-项目未配置代码检查或单元测试框架。`test_queries/` 是手动集成测试运行器。
+`tests/` 是核心纯函数逻辑的单元测试（`python -m pytest tests/`，不加载模型）；`test_queries/` 是手动集成测试运行器。
 
 **实验隔离原则：** `experiment/` 目录下的脚本和数据仅做评估用途，只读取 `intent_module/` 等核心模块进行推理，不修改任何主程序代码。新增实验时遵循同样原则。
 
@@ -123,7 +126,7 @@ CLIP 友好属性（颜色/大小/明暗）与无属性查询归入同一条 CLI
 | **VL 模型** | `VL_MODEL` | `qwen3-vl:8b` |
 | **VL 并行 worker 数** | `VL_PARALLEL_WORKERS` | `1`（串行；并行需配合 `OLLAMA_NUM_PARALLEL`） |
 | **Web 服务端口** | `uvicorn --port` 参数 | `8000` |
-| **Web 服务主机** | `uvicorn --host` 参数 | `0.0.0.0` |
+| **Web 服务主机** | `uvicorn --host` 参数 | `127.0.0.1`（建议；服务无鉴权，勿暴露公网） |
 | CLIP 模型路径 | `*/constants.py`（基于 PROJECT_ROOT 计算） | `models/clip_ViT` |
 | 索引规模 | `REGULAR_INDEX_SIZE` | `-1`（全部图像） |
 | HuggingFace 镜像 | `pipeline.py:8` / `HF_ENDPOINT` | `https://huggingface.co` |
@@ -138,7 +141,7 @@ CLIP 友好属性（颜色/大小/明暗）与无属性查询归入同一条 CLI
 - **共享向量数据库**：`RegularRetrievalModule` 拥有 `OfflineIndexer`；`FineGrainedRetrievalModule` 通过构造函数注入接收。两个模块共享同一个 `CLIPEncoder` 实例。
 - **Taiyi-CLIP 双模型编码**：文本编码使用 Chinese RoBERTa（`models/Chinese_RoBERTa/`），原生支持中文；图像编码使用 CLIP ViT-L/14（`models/clip_ViT/`）。两者经投影对齐到同一 embedding 空间。
 - **意图解析多层回退**：LLM 输出优先 → LLM 漏掉属性 → 类别从常见属性列表回退提取 → 属性从 query 中精确匹配提取。
-- **Ollama**：LLM 和 VL 模型依赖 Ollama 本地推理。VL 默认 3 个 worker 并行做二分类验证，每个 worker 持有独立 `ChatOllama` 实例。粗排阶段控制候选数量避免过载。
+- **Ollama**：LLM 和 VL 模型依赖 Ollama 本地推理。VL 默认串行做二分类验证（`VL_PARALLEL_WORKERS=1`），可通过环境变量开启并行（每个 worker 持有独立 `ChatOllama` 实例；单 GPU 下并行无收益，详见 README 已知限制）。粗排阶段控制候选数量避免过载。
 - **SSE 流式进度**：Web 前端通过 Server-Sent Events 接收检索进度，VL 精排阶段实时推送当前验证的图像名和进度（`web_app/app.py` 中用 `asyncio.Queue` 桥接同步 pipeline 与异步 SSE）。
 - **chat/chat_structured 共享 _chat_impl()**：核心路由逻辑集中在 `_chat_impl()` 私有方法中；`chat()` 提取 `output` 字段返回；`chat_structured()` 返回完整结构化数据 + 支持 progress_callback。CLI 和 Web 两个入口互不影响，修改路由只需改一处。
 - **图像数据**：期望图像位于 `test_images/` 目录下。`data_load.py` 提供图像发现、计数和采样工具。

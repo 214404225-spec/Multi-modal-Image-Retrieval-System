@@ -6,6 +6,11 @@ Agent Pipeline主类
 import os
 import re
 import time
+
+from dotenv import load_dotenv
+# 必须在导入各模块 constants 之前加载 .env（它们在 import 时读取环境变量）
+load_dotenv()
+
 os.environ.setdefault("HF_ENDPOINT", "https://huggingface.co")
 
 from langchain_core.messages import HumanMessage
